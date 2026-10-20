@@ -1,0 +1,484 @@
+<meta charset="utf-8">
+<title>専攻考学信息库</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@600;700&family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+/* Layout: 顶部筛选栏 + 全宽表4（可排序），点行从右侧滑出该専攻的 md 详情；手机上表格行变卡片，详情全屏 */
+:root {
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --sunk: #e9edf3;
+  --ink: #1b2231;
+  --muted: #5b6577;
+  --line: #d9dfe8;
+  --accent: #2a4a8a;
+  --accent-soft: #e2e9f6;
+  --ok: #2e7a4f; --ok-soft: #e1f1e7;
+  --warn: #9a6200; --warn-soft: #f8ecd5;
+  --bad: #a83a32; --bad-soft: #f7e3e1;
+  --g-s: #7a2e8c; --g-a: #2a4a8a; --g-b: #2b7a8a; --g-c: #3d7a3a; --g-d: #8a6d1f; --g-e: #8a4d2a; --g-f: #6b7180;
+  --shadow: 0 10px 40px rgba(20, 30, 60, .18);
+  --f-display: "Shippori Mincho B1", "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --f-body: "Noto Sans JP", "Hiragino Sans", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11151d; --surface: #181e29; --sunk: #202838; --ink: #e4e8f0; --muted: #98a2b5; --line: #2c3547;
+  --accent: #8fb0ee; --accent-soft: #24324d;
+  --ok: #7cc79a; --ok-soft: #1d3428; --warn: #e3b25e; --warn-soft: #3a2f1a; --bad: #ec8e85; --bad-soft: #3d2220;
+  --g-s: #d29ae0; --g-a: #8fb0ee; --g-b: #79c8d6; --g-c: #93cf8f; --g-d: #dcc070; --g-e: #e0a07a; --g-f: #a2a8b6;
+  --shadow: 0 10px 40px rgba(0, 0, 0, .5); color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #11151d; --surface: #181e29; --sunk: #202838; --ink: #e4e8f0; --muted: #98a2b5; --line: #2c3547;
+  --accent: #8fb0ee; --accent-soft: #24324d;
+  --ok: #7cc79a; --ok-soft: #1d3428; --warn: #e3b25e; --warn-soft: #3a2f1a; --bad: #ec8e85; --bad-soft: #3d2220;
+  --g-s: #d29ae0; --g-a: #8fb0ee; --g-b: #79c8d6; --g-c: #93cf8f; --g-d: #dcc070; --g-e: #e0a07a; --g-f: #a2a8b6;
+  --shadow: 0 10px 40px rgba(0, 0, 0, .5); color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.55; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
+.wrap { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+header.top { background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; }
+.top-inner { padding-block: 14px 12px; display: grid; gap: 10px; }
+.brand { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+h1 { font-family: var(--f-display); font-size: 22px; margin: 0; letter-spacing: .02em; text-wrap: balance; }
+.stats { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.stats b { color: var(--ink); font-weight: 500; }
+
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.filters input[type="search"], .filters select {
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px; min-width: 0;
+}
+.filters input[type="search"] { flex: 1 1 260px; }
+.filters select { flex: 0 1 auto; max-width: 180px; }
+.grades { display: flex; gap: 4px; }
+.grades button {
+  font: 500 12px var(--f-mono); width: 28px; height: 28px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg); color: var(--gc, var(--muted));
+}
+.grades button[aria-pressed="true"] { background: var(--gc); color: var(--surface); border-color: var(--gc); }
+.chk { display: inline-flex; gap: 5px; align-items: center; font-size: 13px; color: var(--muted); cursor: pointer; }
+.reset { font: inherit; font-size: 12.5px; background: none; border: 0; color: var(--accent); cursor: pointer; padding: 4px 6px; }
+
+main { padding-block: 14px 40px; }
+.table-box { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+table.t4 { border-collapse: collapse; width: 100%; min-width: 1180px; font-size: 13px; }
+.t4 th {
+  text-align: left; font-weight: 500; font-size: 11.5px; letter-spacing: .06em; color: var(--muted);
+  background: var(--sunk); padding: 8px 10px; white-space: nowrap; position: sticky; top: 0; cursor: pointer; user-select: none;
+}
+.t4 th[data-dir="asc"]::after { content: " ↑"; color: var(--accent); }
+.t4 th[data-dir="desc"]::after { content: " ↓"; color: var(--accent); }
+.t4 td { padding: 9px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+.t4 tbody tr { cursor: pointer; }
+.t4 tbody tr:hover { background: var(--accent-soft); }
+.t4 tbody tr.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.id { font-family: var(--f-mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.uni { font-weight: 700; white-space: nowrap; }
+.sub { color: var(--muted); font-size: 12px; }
+.major { font-weight: 500; }
+.dates { font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 12.5px; }
+.dates .k { color: var(--muted); font-size: 11px; margin-right: 4px; }
+.season { display: none; }
+.grade {
+  display: inline-grid; place-items: center; font: 500 11px var(--f-mono); width: 20px; height: 20px; border-radius: 4px;
+  color: var(--surface); background: var(--gc, var(--g-f)); margin-right: 6px; vertical-align: 1px;
+}
+.pill { display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; background: var(--sunk); color: var(--muted); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.acc { background: var(--accent-soft); color: var(--accent); }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.more { display: flex; justify-content: center; padding: 14px; }
+.more button { font: inherit; font-size: 13px; background: var(--surface); color: var(--accent); border: 1px solid var(--line); border-radius: 6px; padding: 7px 18px; cursor: pointer; }
+.empty { padding: 40px 16px; text-align: center; color: var(--muted); }
+.notice { padding: 40px 16px; color: var(--bad); line-height: 1.8; }
+.notice code { font-family: var(--f-mono); background: var(--sunk); padding: 1px 6px; border-radius: 4px; color: var(--ink); }
+
+/* 详情抽屉 */
+.scrim { position: fixed; inset: 0; background: rgba(10, 14, 24, .35); z-index: 20; }
+aside.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(900px, 100%); z-index: 21; background: var(--surface);
+  box-shadow: var(--shadow); display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top, 0px); padding-right: env(safe-area-inset-right, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.d-head { padding: 14px 20px 12px; border-bottom: 1px solid var(--line); display: grid; gap: 4px; }
+.d-row { display: flex; gap: 10px; align-items: flex-start; }
+.d-title { flex: 1; min-width: 0; }
+.d-title .id { display: block; margin-bottom: 2px; }
+.d-title h2 { font-family: var(--f-display); font-size: 20px; margin: 0; line-height: 1.35; text-wrap: balance; }
+.d-title .sub { font-size: 13px; }
+.d-nav { display: flex; gap: 4px; flex-shrink: 0; }
+.d-nav button { font: inherit; width: 32px; height: 32px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; font-size: 15px; }
+.d-nav button:disabled { opacity: .35; cursor: default; }
+.d-tabs { display: flex; gap: 2px; margin-top: 8px; }
+.d-tabs button { font: inherit; font-size: 13px; padding: 6px 12px; border: 0; background: none; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
+.d-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 500; }
+.d-body { flex: 1; overflow-y: auto; padding: 18px 20px 40px; min-width: 0; }
+
+.kv { display: grid; grid-template-columns: 120px minmax(0, 1fr); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.kv dt, .kv dd { margin: 0; padding: 8px 12px; border-top: 1px solid var(--line); }
+.kv dt:first-of-type, .kv dt:first-of-type + dd { border-top: 0; }
+.kv dt { background: var(--sunk); color: var(--muted); font-size: 12.5px; }
+.kv dd { white-space: pre-wrap; overflow-wrap: anywhere; }
+.kv .grp { grid-column: 1 / -1; background: var(--bg); font-size: 11.5px; letter-spacing: .08em; color: var(--accent); padding: 6px 12px; border-top: 1px solid var(--line); font-weight: 500; }
+
+.md { max-width: 78ch; overflow-wrap: anywhere; }
+.md h1 { font-family: var(--f-display); font-size: 20px; line-height: 1.4; margin: 0 0 12px; text-wrap: balance; }
+.md h2 { font-family: var(--f-display); font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.md h3 { font-size: 15px; margin: 20px 0 8px; }
+.md p, .md li { line-height: 1.75; }
+.md ul { padding-left: 1.3em; }
+.md li + li { margin-top: 3px; }
+.md code { font-family: var(--f-mono); font-size: .9em; background: var(--sunk); padding: 0 4px; border-radius: 3px; }
+.md .tbl { overflow-x: auto; margin: 10px 0; border: 1px solid var(--line); border-radius: 6px; max-width: none; }
+.md table { border-collapse: collapse; font-size: 12.5px; min-width: 640px; width: 100%; }
+.md th, .md td { border-top: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+.md th { background: var(--sunk); border-top: 0; font-weight: 500; white-space: nowrap; }
+.md blockquote { margin: 10px 0; padding: 4px 14px; border-left: 3px solid var(--line); color: var(--muted); }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+.src { margin-top: 24px; font-size: 12px; color: var(--muted); font-family: var(--f-mono); overflow-wrap: anywhere; }
+
+@media (max-width: 760px) {
+  header.top { position: static; }
+  table.t4 { min-width: 0; }
+  .season { display: block; font-size: 11px; color: var(--accent); margin-top: 4px; }
+  .t4 .pill { white-space: normal; }
+  .t4 thead { display: none; }
+  .t4, .t4 tbody, .t4 tr, .t4 td { display: block; }
+  .t4 tbody tr { padding: 10px 12px; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; }
+  .t4 tbody tr:first-child { border-top: 0; }
+  .t4 td { border: 0; padding: 0; }
+  .t4 td.c-id { grid-column: 2; grid-row: 1; text-align: right; }
+  .t4 td.c-uni { grid-column: 1; grid-row: 1; }
+  .t4 td.c-major { grid-column: 1 / -1; }
+  .t4 td.c-field, .t4 td.c-eng, .t4 td.c-upd { display: none; }
+  .t4 td.c-ss, .t4 td.c-aw { grid-column: 1 / -1; }
+  .t4 td.c-kako, .t4 td.c-pre { display: inline-block; grid-column: auto; margin-top: 4px; }
+  .dates .k { display: inline; }
+  .filters select { flex: 1 1 40%; max-width: none; }
+  .kv { grid-template-columns: 92px minmax(0, 1fr); }
+  .d-head, .d-body { padding-left: 16px; padding-right: 16px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  aside.drawer { animation: slide .18s ease-out; }
+  @keyframes slide { from { transform: translateX(24px); opacity: .6; } }
+}
+</style>
+
+<header class="top">
+  <div class="wrap top-inner">
+    <div class="brand">
+      <h1>専攻考学信息库</h1>
+      <span class="stats" id="stats">读取数据中…</span>
+    </div>
+    <div class="filters">
+      <input type="search" id="q" placeholder="搜索 大学 / 研究科 / 専攻 / 编号 / 考试内容" aria-label="搜索">
+      <div class="grades" id="grades" role="group" aria-label="推荐等级"></div>
+      <select id="f-field" aria-label="领域"><option value="">全部领域</option></select>
+      <select id="f-pref" aria-label="所在地"><option value="">全部所在地</option></select>
+      <select id="f-kako" aria-label="過去問"><option value="">過去問：全部</option></select>
+      <select id="f-pre" aria-label="事前連絡"><option value="">事前連絡：全部</option></select>
+      <select id="f-status" aria-label="数据状态">
+        <option value="">数据：全部</option>
+        <option value="both">表4＋md 都有</option>
+        <option value="nomd">表4有、缺md</option>
+        <option value="onlymd">只有md、不在表4</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="f-hsp"> 只看高度人才加点</label>
+      <button class="reset" id="reset" type="button">清除筛选</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="table-box">
+    <table class="t4">
+      <thead><tr>
+        <th data-key="编号">编号</th>
+        <th data-key="大学">大学</th>
+        <th data-key="専攻">研究科 · 専攻</th>
+        <th data-key="领域">领域</th>
+        <th data-key="春夏_出願时间">春夏 出願 / 試験</th>
+        <th data-key="秋冬_出願时间">秋冬 出願 / 試験</th>
+        <th data-key="英語">英語 / 日本語</th>
+        <th data-key="過去問">過去問</th>
+        <th data-key="事前連絡">事前連絡</th>
+        <th data-key="更新日期">更新</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="more" id="more" hidden><button type="button" id="more-btn">再显示 200 行</button></div>
+    <div id="empty" class="empty" hidden>没有符合条件的専攻。换个关键词，或点「清除筛选」。</div>
+  </div>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="専攻详情">
+  <div class="d-head">
+    <div class="d-row">
+      <div class="d-title" id="d-title"></div>
+      <div class="d-nav">
+        <button type="button" id="d-prev" aria-label="上一个" title="上一个（↑）">↑</button>
+        <button type="button" id="d-next" aria-label="下一个" title="下一个（↓）">↓</button>
+        <button type="button" id="d-close" aria-label="关闭" title="关闭（Esc）">✕</button>
+      </div>
+    </div>
+    <div class="d-tabs" role="tablist">
+      <button type="button" role="tab" data-tab="md" aria-selected="true">exam-monitor 详情</button>
+      <button type="button" role="tab" data-tab="t4" aria-selected="false">表4 字段</button>
+    </div>
+  </div>
+  <div class="d-body" id="d-body"></div>
+</aside>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script>
+const GRADES = ["S", "A", "B", "C", "D", "E", "F"];
+const T4_GROUPS = [
+  ["基本", ["编号", "大学", "推荐等级", "所在地", "高度人才加点对象", "研究科", "専攻", "领域"]],
+  ["日程", ["春夏_出願时间", "春夏_試験时间", "秋冬_出願时间", "秋冬_試験时间"]],
+  ["語学", ["英語", "日本語"]],
+  ["考试内容", ["筆記内容", "口述/面接内容"]],
+  ["其他", ["過去問", "事前連絡", "定員/倍率", "募集要項", "更新日期"]],
+];
+const SEARCH_KEYS = ["编号", "大学", "研究科", "専攻", "领域", "所在地", "筆記内容", "口述/面接内容"];
+
+let ROWS = [], view = [], shown = 200, sortKey = "编号", sortDir = "asc";
+let current = null, tab = "md";
+const mdCache = {};
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const gradeVar = g => GRADES.includes(g) ? `var(--g-${g.toLowerCase()})` : "var(--g-f)";
+const fields = r => (r["领域"] || "").split(/[;；]/).map(s => s.trim()).filter(Boolean);
+
+function kakoClass(v) {
+  if (!v) return "";
+  if (v.startsWith("网上公开")) return "ok";
+  if (v.includes("窗口") || v.includes("申请")) return "warn";
+  if (v === "不公开") return "bad";
+  return "";
+}
+function preClass(v) {
+  if (v === "必须") return "bad";
+  if (v.startsWith("部分") || v === "推荐" || v.startsWith("要")) return "warn";
+  if (v === "不要") return "ok";
+  return "";
+}
+const pill = (v, cls) => v ? `<span class="pill ${cls}">${esc(v)}</span>` : `<span class="sub">—</span>`;
+
+function datesCell(season, apply, exam) {
+  if (!apply && !exam) return `<span class="sub">—</span>`;
+  return `<span class="season">${season}</span><div class="dates"><span class="k">出願</span>${esc(apply || "—")}</div><div class="dates"><span class="k">試験</span>${esc(exam || "—")}</div>`;
+}
+
+function rowHtml(r, i) {
+  const st = r._only_md ? `<span class="pill acc">仅md</span>` : (!r._md ? `<span class="pill bad">缺md</span>` : "");
+  return `<tr data-i="${i}" data-id="${esc(r["编号"])}"${current === r ? ' class="active"' : ""}>
+    <td class="c-id"><span class="id">${esc(r["编号"])}</span></td>
+    <td class="c-uni"><span class="grade" style="--gc:${gradeVar(r["推荐等级"])}">${esc(r["推荐等级"] || "?")}</span><span class="uni">${esc(r["大学"])}</span><div class="sub">${esc(r["所在地"])}${r["高度人才加点对象"] === "是" ? " · 高度人才加点" : ""}</div></td>
+    <td class="c-major"><div class="major">${esc(r["専攻"])} ${st}</div><div class="sub">${esc(r["研究科"])}</div></td>
+    <td class="c-field"><div class="tags">${fields(r).map(f => `<span class="pill">${esc(f)}</span>`).join("")}</div></td>
+    <td class="c-ss">${datesCell("春夏", r["春夏_出願时间"], r["春夏_試験时间"])}</td>
+    <td class="c-aw">${datesCell("秋冬", r["秋冬_出願时间"], r["秋冬_試験时间"])}</td>
+    <td class="c-eng"><div>${esc(r["英語"] || "—")}</div><div class="sub">${esc(r["日本語"] || "")}</div></td>
+    <td class="c-kako">${pill(r["過去問"], kakoClass(r["過去問"]))}</td>
+    <td class="c-pre">${pill(r["事前連絡"], preClass(r["事前連絡"]))}</td>
+    <td class="c-upd"><span class="dates sub">${esc(r["更新日期"])}</span></td>
+  </tr>`;
+}
+
+const activeGrades = new Set();
+function applyFilters() {
+  const q = $("q").value.trim().toLowerCase();
+  const terms = q ? q.split(/\s+/) : [];
+  const field = $("f-field").value, pref = $("f-pref").value, kako = $("f-kako").value, pre = $("f-pre").value;
+  const status = $("f-status").value, hsp = $("f-hsp").checked;
+  view = ROWS.filter(r => {
+    if (activeGrades.size && !activeGrades.has(r["推荐等级"])) return false;
+    if (field && !fields(r).includes(field)) return false;
+    if (pref && r["所在地"] !== pref) return false;
+    if (kako && r["過去問"] !== kako) return false;
+    if (pre && r["事前連絡"] !== pre) return false;
+    if (hsp && r["高度人才加点对象"] !== "是") return false;
+    if (status === "both" && (!r._md || r._only_md)) return false;
+    if (status === "nomd" && r._md) return false;
+    if (status === "onlymd" && !r._only_md) return false;
+    if (terms.length) {
+      const hay = r._hay || (r._hay = SEARCH_KEYS.map(k => r[k]).join(" ").toLowerCase());
+      if (!terms.every(t => hay.includes(t))) return false;
+    }
+    return true;
+  });
+  const dir = sortDir === "asc" ? 1 : -1;
+  const gkey = r => GRADES.indexOf(r["推荐等级"]) + 1 || 99;
+  view.sort((a, b) => {
+    if (sortKey === "大学") return (gkey(a) - gkey(b) || a["编号"].localeCompare(b["编号"])) * dir;
+    return (String(a[sortKey] || "").localeCompare(String(b[sortKey] || ""), "ja") || a["编号"].localeCompare(b["编号"])) * dir;
+  });
+  shown = 200;
+  render();
+}
+
+function render() {
+  $("tbody").innerHTML = view.slice(0, shown).map(rowHtml).join("");
+  $("more").hidden = view.length <= shown;
+  $("more-btn").textContent = `再显示 ${Math.min(200, view.length - shown)} 行（剩 ${view.length - shown}）`;
+  $("empty").hidden = view.length > 0;
+  const t4n = ROWS.filter(r => !r._only_md).length, mdn = ROWS.filter(r => r._md).length;
+  $("stats").innerHTML = `显示 <b>${view.length}</b> / ${ROWS.length} · 表4 ${t4n} 行 · md ${mdn} 篇`;
+  document.querySelectorAll(".t4 th").forEach(th => th.dataset.dir = th.dataset.key === sortKey ? sortDir : "");
+}
+
+function fillSelect(id, values) {
+  const sel = $(id);
+  values.forEach(v => sel.insertAdjacentHTML("beforeend", `<option value="${esc(v)}">${esc(v)}</option>`));
+}
+function countedValues(fn) {
+  const m = new Map();
+  ROWS.forEach(r => [].concat(fn(r)).forEach(v => v && m.set(v, (m.get(v) || 0) + 1)));
+  return [...m.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0]);
+}
+
+/* ---- 详情 ---- */
+async function loadMd(r) {
+  if (!r._md) return null;
+  const uni = r["编号"].slice(0, 3);
+  if (!mdCache[uni]) mdCache[uni] = fetch(`data/md/${uni}.json`).then(res => { if (!res.ok) throw new Error(res.status); return res.json(); });
+  return (await mdCache[uni])[r["编号"]] ?? null;
+}
+
+if (window.DOMPurify) DOMPurify.addHook("afterSanitizeAttributes", node => {
+  if (node.tagName === "A" && /^https?:/i.test(node.getAttribute("href") || "")) {
+    node.setAttribute("target", "_blank");
+    node.setAttribute("rel", "noopener noreferrer");
+  }
+});
+
+function renderMd(text) {
+  const html = window.marked && window.DOMPurify
+    // CommonMark 不认紧贴中文标点的 **粗体**（如「**10/13（周二）**起」），先自己转成 <strong>
+    ? DOMPurify.sanitize(marked.parse(text.replace(/\*\*([^*\n]+?)\*\*/g, "<strong>$1</strong>"), { gfm: true }))
+    : `<pre style="white-space:pre-wrap">${esc(text)}</pre>`;
+  const box = document.createElement("div");
+  box.className = "md";
+  box.innerHTML = html;
+  box.querySelectorAll("table").forEach(t => { const w = document.createElement("div"); w.className = "tbl"; t.replaceWith(w); w.appendChild(t); });
+  return box;
+}
+
+function t4Html(r) {
+  if (r._only_md) return `<p class="sub">这个専攻只有 exam-monitor 的 md，表4里还没有对应行。上方的大学、研究科等信息取自表1和表3。</p>`;
+  return `<dl class="kv">${T4_GROUPS.map(([g, keys]) => `<div class="grp">${g}</div>` + keys.map(k => {
+    let v = r[k] || "";
+    v = k === "募集要項" && /^https?:/.test(v) ? `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">${esc(v)}</a>` : (esc(v) || '<span class="sub">—</span>');
+    return `<dt>${esc(k)}</dt><dd>${v}</dd>`;
+  }).join("")).join("")}</dl>`;
+}
+
+let renderToken = 0;
+async function showDetail() {
+  const r = current, token = ++renderToken, body = $("d-body");
+  $("d-title").innerHTML = `<span class="id">${esc(r["编号"])}</span><h2>${esc(r["大学"])} · ${esc(r["専攻"])}</h2>
+    <div class="sub"><span class="grade" style="--gc:${gradeVar(r["推荐等级"])}">${esc(r["推荐等级"] || "?")}</span>${esc(r["研究科"])} · ${esc(r["所在地"])}${r["更新日期"] ? " · 表4 更新 " + esc(r["更新日期"]) : ""}</div>`;
+  document.querySelectorAll(".d-tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  const i = view.indexOf(r);
+  $("d-prev").disabled = i <= 0;
+  $("d-next").disabled = i < 0 || i >= view.length - 1;
+  body.scrollTop = 0;
+  if (tab === "t4") { body.innerHTML = t4Html(r); return; }
+  if (!r._md) { body.innerHTML = `<p class="sub">exam-monitor 里没有编号为 ${esc(r["编号"])} 的 md。可以先看「表4 字段」。</p>`; return; }
+  body.innerHTML = `<p class="sub">读取 md…</p>`;
+  try {
+    const text = await loadMd(r);
+    if (token !== renderToken) return;
+    body.innerHTML = "";
+    body.appendChild(renderMd(text || ""));
+    body.insertAdjacentHTML("beforeend", `<div class="src">${esc(r._md)}</div>`);
+  } catch (e) {
+    if (token === renderToken) body.innerHTML = `<p class="notice">md 读取失败（${esc(e.message)}）。先运行 <code>python3 web/build.py</code> 生成数据。</p>`;
+  }
+}
+
+function openDetail(r) {
+  current = r;
+  $("drawer").hidden = false; $("scrim").hidden = false;
+  document.querySelectorAll(".t4 tbody tr.active").forEach(tr => tr.classList.remove("active"));
+  const tr = document.querySelector(`.t4 tbody tr[data-id="${CSS.escape(r["编号"])}"]`);
+  if (tr) { tr.classList.add("active"); tr.scrollIntoView({ block: "nearest" }); }
+  try { history.replaceState(null, "", "#" + r["编号"]); } catch (e) {}
+  showDetail();
+}
+function closeDetail() {
+  $("drawer").hidden = true; $("scrim").hidden = true;
+  try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+}
+function step(d) {
+  const i = view.indexOf(current) + d;
+  if (i < 0 || i >= view.length) return;
+  if (i >= shown) { shown = i + 1; render(); }
+  openDetail(view[i]);
+}
+
+/* ---- 事件 ---- */
+$("tbody").addEventListener("click", e => { const tr = e.target.closest("tr"); if (tr) openDetail(view[+tr.dataset.i]); });
+document.querySelectorAll(".t4 th").forEach(th => th.addEventListener("click", () => {
+  sortDir = sortKey === th.dataset.key && sortDir === "asc" ? "desc" : "asc";
+  sortKey = th.dataset.key; applyFilters();
+}));
+["q"].forEach(id => $(id).addEventListener("input", applyFilters));
+["f-field", "f-pref", "f-kako", "f-pre", "f-status", "f-hsp"].forEach(id => $(id).addEventListener("change", applyFilters));
+$("reset").addEventListener("click", () => {
+  $("q").value = ""; ["f-field", "f-pref", "f-kako", "f-pre", "f-status"].forEach(id => $(id).value = "");
+  $("f-hsp").checked = false; activeGrades.clear();
+  document.querySelectorAll("#grades button").forEach(b => b.setAttribute("aria-pressed", "false"));
+  applyFilters();
+});
+$("more-btn").addEventListener("click", () => { shown += 200; render(); });
+$("d-close").addEventListener("click", closeDetail);
+$("scrim").addEventListener("click", closeDetail);
+$("d-prev").addEventListener("click", () => step(-1));
+$("d-next").addEventListener("click", () => step(1));
+document.querySelectorAll(".d-tabs button").forEach(b => b.addEventListener("click", () => { tab = b.dataset.tab; showDetail(); }));
+document.addEventListener("keydown", e => {
+  if ($("drawer").hidden || e.target.matches("input, select")) return;
+  if (e.key === "Escape") closeDetail();
+  else if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); step(1); }
+  else if (e.key === "ArrowUp" || e.key === "k") { e.preventDefault(); step(-1); }
+});
+
+GRADES.forEach(g => {
+  $("grades").insertAdjacentHTML("beforeend", `<button type="button" aria-pressed="false" style="--gc:${gradeVar(g)}" title="推荐等级 ${g}">${g}</button>`);
+});
+$("grades").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const g = b.textContent, on = !activeGrades.has(g);
+  on ? activeGrades.add(g) : activeGrades.delete(g);
+  b.setAttribute("aria-pressed", on); applyFilters();
+});
+
+fetch("data/rows.json").then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).then(d => {
+  ROWS = d.rows;
+  fillSelect("f-field", countedValues(fields));
+  fillSelect("f-pref", countedValues(r => r["所在地"]));
+  fillSelect("f-kako", countedValues(r => r["過去問"]));
+  fillSelect("f-pre", countedValues(r => r["事前連絡"]));
+  applyFilters();
+  const h = decodeURIComponent(location.hash.slice(1));
+  const r = h && ROWS.find(x => x["编号"] === h);
+  if (r) openDetail(r);
+}).catch(e => {
+  $("stats").textContent = "数据没有读到";
+  $("tbody").innerHTML = `<tr><td colspan="10"><div class="notice">读取 data/rows.json 失败（${esc(e.message)}）。<br>在仓库根目录运行 <code>python3 web/build.py</code>，再运行 <code>python3 -m http.server -d web 8000</code>，打开 http://localhost:8000 。直接双击打开 html 文件时浏览器不允许读取数据。</div></td></tr>`;
+});
+</script>

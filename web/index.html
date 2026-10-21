@@ -123,7 +123,14 @@ body[data-mode="table"] .cards { display: none; }
 .uc-fold { font: inherit; font-size: 12.5px; color: var(--accent); background: none; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; flex-shrink: 0; }
 .uc-body { padding: 4px 0 8px; }
 .sc + .sc { border-top: 1px dashed var(--line); }
-.sc-name { padding: 10px 18px 4px; font-size: 12.5px; font-weight: 700; color: var(--accent); letter-spacing: .03em; }
+.sc-name {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; font: inherit; background: none; border: 0; cursor: pointer;
+  padding: 10px 18px 4px; font-size: 12.5px; font-weight: 700; color: var(--accent); letter-spacing: .03em;
+}
+.sc-name:hover { background: var(--bg); }
+.sc-name .chev { display: inline-block; width: 1em; font-weight: 400; transition: transform .15s; }
+.sc.folded .sc-name { padding-bottom: 10px; }
+.sc.folded .chev { transform: rotate(-90deg); }
 .sc-name .n { font-weight: 400; color: var(--muted); margin-left: 6px; }
 .m-row {
   display: grid; grid-template-columns: 5.2em minmax(0, 0.62fr) minmax(0, 1fr) minmax(0, 1fr) 11.5em;
@@ -317,7 +324,8 @@ const SEARCH_KEYS = ["编号", "大学", "研究科", "専攻", "领域", "所�
 
 let ROWS = [], view = [], shown = 200, sortKey = "编号", sortDir = "asc";
 let groups = [], shownGroups = 20, mode = "cards";
-const folded = new Set();
+const folded = new Set(), foldedSc = new Set();
+const scKey = r => r["编号"].slice(0, 3) + "|" + (r["研究科"] || "（研究科未填）");
 try { if (localStorage.getItem("t4-mode") === "table") mode = "table"; } catch (e) {}
 let current = null, tab = "md";
 const mdCache = {};
@@ -427,8 +435,10 @@ function cardHtml(g) {
         <div class="sub">${g.uni} · ${esc(r["所在地"])}${r["高度人才加点对象"] === "是" ? " · 高度人才加点" : ""} · ${g.schools.size} 研究科 · ${n} 専攻</div></div>
       <button type="button" class="uc-fold" aria-expanded="${!isFolded}">${isFolded ? "展开" : "收起"}</button>
     </div>
-    <div class="uc-body"${isFolded ? " hidden" : ""}>${[...g.schools.entries()].map(([sc, rows]) =>
-      `<div class="sc"><div class="sc-name">${esc(sc)}<span class="n">${rows.length}</span></div>${rows.map(mRowHtml).join("")}</div>`).join("")}</div>
+    <div class="uc-body"${isFolded ? " hidden" : ""}>${[...g.schools.entries()].map(([sc, rows]) => {
+        const k = g.uni + "|" + sc, f = foldedSc.has(k);
+        return `<div class="sc${f ? " folded" : ""}" data-sc="${esc(k)}"><button type="button" class="sc-name" aria-expanded="${!f}"><span class="chev">▾</span>${esc(sc)}<span class="n">${rows.length}</span></button>${f ? "" : rows.map(mRowHtml).join("")}</div>`;
+      }).join("")}</div>
   </section>`;
 }
 
@@ -545,7 +555,8 @@ function step(d) {
   if (mode === "table" && i >= shown) { shown = i + 1; render(); }
   if (mode === "cards") {
     const u = view[i]["编号"].slice(0, 3), gi = groups.findIndex(g => g.uni === u);
-    if (gi >= shownGroups || folded.has(u)) { folded.delete(u); shownGroups = Math.max(shownGroups, gi + 1); render(); }
+    const k = scKey(view[i]);
+    if (gi >= shownGroups || folded.has(u) || foldedSc.has(k)) { folded.delete(u); foldedSc.delete(k); shownGroups = Math.max(shownGroups, gi + 1); render(); }
   }
   openDetail(view[i]);
 }
@@ -570,6 +581,12 @@ $("cards").addEventListener("click", e => {
   if (fold) {
     const u = fold.closest(".uc").dataset.uni;
     folded.has(u) ? folded.delete(u) : folded.add(u);
+    render(); return;
+  }
+  const scBtn = e.target.closest(".sc-name");
+  if (scBtn) {
+    const k = scBtn.closest(".sc").dataset.sc;
+    foldedSc.has(k) ? foldedSc.delete(k) : foldedSc.add(k);
     render(); return;
   }
   const row = e.target.closest(".m-row");

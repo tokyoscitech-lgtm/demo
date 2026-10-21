@@ -178,7 +178,7 @@ aside.drawer {
 .kv dd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .kv .grp { grid-column: 1 / -1; background: var(--bg); font-size: 11.5px; letter-spacing: .08em; color: var(--accent); padding: 6px 12px; border-top: 1px solid var(--line); font-weight: 500; }
 
-.md { max-width: 78ch; overflow-wrap: anywhere; }
+.md { overflow-wrap: anywhere; }
 .md h1 { font-family: var(--f-display); font-size: 20px; line-height: 1.4; margin: 0 0 12px; text-wrap: balance; }
 .md h2 { font-family: var(--f-display); font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
 .md h3 { font-size: 15px; margin: 20px 0 8px; }
@@ -302,8 +302,8 @@ aside.drawer {
       </div>
     </div>
     <div class="d-tabs" role="tablist">
-      <button type="button" role="tab" data-tab="md" aria-selected="true">exam-monitor 详情</button>
-      <button type="button" role="tab" data-tab="t4" aria-selected="false">表4 字段</button>
+      <button type="button" role="tab" data-tab="t4" aria-selected="true">情况一览</button>
+      <button type="button" role="tab" data-tab="md" aria-selected="false">详情</button>
     </div>
   </div>
   <div class="d-body" id="d-body"></div>
@@ -327,7 +327,7 @@ let groups = [], shownGroups = 20, mode = "cards";
 const folded = new Set(), foldedSc = new Set();
 const scKey = r => r["编号"].slice(0, 3) + "|" + (r["研究科"] || "（研究科未填）");
 try { if (localStorage.getItem("t4-mode") === "table") mode = "table"; } catch (e) {}
-let current = null, tab = "md";
+let current = null, tab = "t4";
 const mdCache = {};
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -523,7 +523,7 @@ async function showDetail() {
   $("d-next").disabled = i < 0 || i >= view.length - 1;
   body.scrollTop = 0;
   if (tab === "t4") { body.innerHTML = t4Html(r); return; }
-  if (!r._md) { body.innerHTML = `<p class="sub">exam-monitor 里没有编号为 ${esc(r["编号"])} 的 md。可以先看「表4 字段」。</p>`; return; }
+  if (!r._md) { body.innerHTML = `<p class="sub">exam-monitor 里没有编号为 ${esc(r["编号"])} 的 md。可以先看「情况一览」。</p>`; return; }
   body.innerHTML = `<p class="sub">读取 md…</p>`;
   try {
     const text = await loadMd(r);
@@ -536,8 +536,9 @@ async function showDetail() {
   }
 }
 
-function openDetail(r) {
+function openDetail(r, keepTab) {
   current = r;
+  if (!keepTab) tab = r._only_md ? "md" : "t4";
   $("drawer").hidden = false; $("scrim").hidden = false;
   document.querySelectorAll(".t4 tbody tr.active, .m-row.active").forEach(tr => tr.classList.remove("active"));
   const tr = document.querySelector(`.t4 tbody tr[data-id="${CSS.escape(r["编号"])}"], .m-row[data-id="${CSS.escape(r["编号"])}"]`);
@@ -558,7 +559,7 @@ function step(d) {
     const k = scKey(view[i]);
     if (gi >= shownGroups || folded.has(u) || foldedSc.has(k)) { folded.delete(u); foldedSc.delete(k); shownGroups = Math.max(shownGroups, gi + 1); render(); }
   }
-  openDetail(view[i]);
+  openDetail(view[i], true);
 }
 
 /* ---- 事件 ---- */

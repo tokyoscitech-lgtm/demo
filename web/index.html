@@ -70,7 +70,7 @@ h1 { font-family: var(--f-display); font-size: 22px; margin: 0; letter-spacing: 
 
 main { padding-block: 14px 40px; }
 .table-box { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
-table.t4 { border-collapse: collapse; width: 100%; min-width: 1180px; font-size: 13px; }
+table.t4 { border-collapse: collapse; width: 100%; min-width: 1300px; font-size: 13px; }
 .t4 th {
   text-align: left; font-weight: 500; font-size: 11.5px; letter-spacing: .06em; color: var(--muted);
   background: var(--sunk); padding: 8px 10px; white-space: nowrap; position: sticky; top: 0; cursor: pointer; user-select: none;
@@ -85,6 +85,8 @@ table.t4 { border-collapse: collapse; width: 100%; min-width: 1180px; font-size:
 .uni { font-weight: 700; white-space: nowrap; }
 .sub { color: var(--muted); font-size: 12px; }
 .major { font-weight: 500; }
+.c-school { font-size: 13px; min-width: 9em; }
+.c-major { min-width: 11em; }
 .dates { font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 12.5px; }
 .dates .k { color: var(--muted); font-size: 11px; margin-right: 4px; }
 .season { display: none; }
@@ -160,7 +162,7 @@ aside.drawer {
   .t4 td { border: 0; padding: 0; }
   .t4 td.c-id { grid-column: 2; grid-row: 1; text-align: right; }
   .t4 td.c-uni { grid-column: 1; grid-row: 1; }
-  .t4 td.c-major { grid-column: 1 / -1; }
+  .t4 td.c-school, .t4 td.c-major { grid-column: 1 / -1; min-width: 0; }
   .t4 td.c-field, .t4 td.c-eng, .t4 td.c-upd { display: none; }
   .t4 td.c-ss, .t4 td.c-aw { grid-column: 1 / -1; }
   .t4 td.c-kako, .t4 td.c-pre { display: inline-block; grid-column: auto; margin-top: 4px; }
@@ -206,7 +208,8 @@ aside.drawer {
       <thead><tr>
         <th data-key="编号">编号</th>
         <th data-key="大学">大学</th>
-        <th data-key="専攻">研究科 · 専攻</th>
+        <th data-key="研究科">研究科</th>
+        <th data-key="専攻">専攻</th>
         <th data-key="领域">领域</th>
         <th data-key="春夏_出願时间">春夏 出願 / 試験</th>
         <th data-key="秋冬_出願时间">秋冬 出願 / 試験</th>
@@ -287,7 +290,8 @@ function rowHtml(r, i) {
   return `<tr data-i="${i}" data-id="${esc(r["编号"])}"${current === r ? ' class="active"' : ""}>
     <td class="c-id"><span class="id">${esc(r["编号"])}</span></td>
     <td class="c-uni"><span class="grade" style="--gc:${gradeVar(r["推荐等级"])}">${esc(r["推荐等级"] || "?")}</span><span class="uni">${esc(r["大学"])}</span><div class="sub">${esc(r["所在地"])}${r["高度人才加点对象"] === "是" ? " · 高度人才加点" : ""}</div></td>
-    <td class="c-major"><div class="major">${esc(r["専攻"])} ${st}</div><div class="sub">${esc(r["研究科"])}</div></td>
+    <td class="c-school">${esc(r["研究科"]) || '<span class="sub">—</span>'}</td>
+    <td class="c-major"><div class="major">${esc(r["専攻"])} ${st}</div></td>
     <td class="c-field"><div class="tags">${fields(r).map(f => `<span class="pill">${esc(f)}</span>`).join("")}</div></td>
     <td class="c-ss">${datesCell("春夏", r["春夏_出願时间"], r["春夏_試験时间"])}</td>
     <td class="c-aw">${datesCell("秋冬", r["秋冬_出願时间"], r["秋冬_試験时间"])}</td>
@@ -389,8 +393,8 @@ function t4Html(r) {
 let renderToken = 0;
 async function showDetail() {
   const r = current, token = ++renderToken, body = $("d-body");
-  $("d-title").innerHTML = `<span class="id">${esc(r["编号"])}</span><h2>${esc(r["大学"])} · ${esc(r["専攻"])}</h2>
-    <div class="sub"><span class="grade" style="--gc:${gradeVar(r["推荐等级"])}">${esc(r["推荐等级"] || "?")}</span>${esc(r["研究科"])} · ${esc(r["所在地"])}${r["更新日期"] ? " · 表4 更新 " + esc(r["更新日期"]) : ""}</div>`;
+  $("d-title").innerHTML = `<span class="id">${esc(r["编号"])}</span><h2>${esc(r["大学"])} · ${esc(r["研究科"])} · ${esc(r["専攻"])}</h2>
+    <div class="sub"><span class="grade" style="--gc:${gradeVar(r["推荐等级"])}">${esc(r["推荐等级"] || "?")}</span>${esc(r["所在地"])}${r["更新日期"] ? " · 表4 更新 " + esc(r["更新日期"]) : ""}</div>`;
   document.querySelectorAll(".d-tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab));
   const i = view.indexOf(r);
   $("d-prev").disabled = i <= 0;
@@ -479,6 +483,6 @@ fetch("data/rows.json").then(r => { if (!r.ok) throw new Error(r.status); return
   if (r) openDetail(r);
 }).catch(e => {
   $("stats").textContent = "数据没有读到";
-  $("tbody").innerHTML = `<tr><td colspan="10"><div class="notice">读取 data/rows.json 失败（${esc(e.message)}）。<br>在仓库根目录运行 <code>python3 web/build.py</code>，再运行 <code>python3 -m http.server -d web 8000</code>，打开 http://localhost:8000 。直接双击打开 html 文件时浏览器不允许读取数据。</div></td></tr>`;
+  $("tbody").innerHTML = `<tr><td colspan="11"><div class="notice">读取 data/rows.json 失败（${esc(e.message)}）。<br>在仓库根目录运行 <code>python3 web/build.py</code>，再运行 <code>python3 -m http.server -d web 8000</code>，打开 http://localhost:8000 。直接双击打开 html 文件时浏览器不允许读取数据。</div></td></tr>`;
 });
 </script>

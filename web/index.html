@@ -100,6 +100,43 @@ table.t4 { border-collapse: collapse; width: 100%; min-width: 1300px; font-size:
 .pill.bad { background: var(--bad-soft); color: var(--bad); }
 .pill.acc { background: var(--accent-soft); color: var(--accent); }
 .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+/* 视图切换与排序 */
+.brand .spacer { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { font: inherit; font-size: 13px; padding: 5px 12px; border: 0; background: var(--bg); color: var(--muted); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+.sortbox { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.sortbox select { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+body[data-mode="cards"] .table-box { display: none; }
+body[data-mode="table"] .cards { display: none; }
+
+/* 大学卡片 */
+.cards { display: grid; gap: 16px; }
+.uc { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.uc-head { display: flex; align-items: center; gap: 14px; padding: 14px 18px; background: var(--sunk); border-bottom: 1px solid var(--line); }
+.uc.folded .uc-head { border-bottom: 0; }
+.uc-head .grade { width: 34px; height: 34px; font-size: 16px; border-radius: 7px; margin: 0; flex-shrink: 0; }
+.uc-title { flex: 1; min-width: 0; }
+.uc-title h3 { font-family: var(--f-display); font-size: 19px; margin: 0; line-height: 1.3; }
+.uc-title .sub { font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.uc-fold { font: inherit; font-size: 12.5px; color: var(--accent); background: none; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; flex-shrink: 0; }
+.uc-body { padding: 4px 0 8px; }
+.sc + .sc { border-top: 1px dashed var(--line); }
+.sc-name { padding: 10px 18px 4px; font-size: 12.5px; font-weight: 700; color: var(--accent); letter-spacing: .03em; }
+.sc-name .n { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.m-row {
+  display: grid; grid-template-columns: 5.2em minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) 11.5em;
+  gap: 4px 16px; padding: 9px 18px; cursor: pointer; align-items: start;
+}
+.m-row:hover { background: var(--accent-soft); }
+.m-row.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.m-row .id { padding-top: 2px; }
+.m-main { min-width: 0; display: grid; gap: 4px; }
+.m-row .dates { white-space: normal; }
+.m-row .season { display: block; font-size: 11px; color: var(--accent); }
+.m-flags { display: grid; gap: 4px; justify-items: start; }
+.m-row .pill { white-space: normal; }
 .more { display: flex; justify-content: center; padding: 14px; }
 .more button { font: inherit; font-size: 13px; background: var(--surface); color: var(--accent); border: 1px solid var(--line); border-radius: 6px; padding: 7px 18px; cursor: pointer; }
 .empty { padding: 40px 16px; text-align: center; color: var(--muted); }
@@ -151,6 +188,13 @@ aside.drawer {
 .src { margin-top: 24px; font-size: 12px; color: var(--muted); font-family: var(--f-mono); overflow-wrap: anywhere; }
 
 @media (max-width: 760px) {
+  .m-row { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 16px; }
+  .m-row .id { grid-column: 2; grid-row: 1; }
+  .m-main { grid-column: 1; grid-row: 1; }
+  .m-row .m-ss, .m-row .m-aw, .m-flags { grid-column: 1 / -1; }
+  .m-flags { display: flex; flex-wrap: wrap; }
+  .uc-head { padding: 12px 16px; }
+  .sc-name { padding-left: 16px; padding-right: 16px; }
   header.top { position: static; }
   table.t4 { min-width: 0; }
   .season { display: block; font-size: 11px; color: var(--accent); margin-top: 4px; }
@@ -182,6 +226,19 @@ aside.drawer {
     <div class="brand">
       <h1>東京理工塾考学信息库</h1>
       <span class="stats" id="stats">读取数据中…</span>
+      <span class="spacer"></span>
+      <label class="sortbox">排序
+        <select id="sort" aria-label="排序">
+          <option value="编号|asc">编号</option>
+          <option value="大学|asc">推荐等级</option>
+          <option value="所在地|asc">所在地</option>
+          <option value="更新日期|desc">更新日期（新→旧）</option>
+        </select>
+      </label>
+      <div class="seg" role="group" aria-label="显示方式">
+        <button type="button" id="mode-cards" aria-pressed="true">按大学</button>
+        <button type="button" id="mode-table" aria-pressed="false">表格</button>
+      </div>
     </div>
     <div class="filters">
       <input type="search" id="q" placeholder="搜索 大学 / 研究科 / 専攻 / 编号 / 考试内容" aria-label="搜索">
@@ -203,6 +260,7 @@ aside.drawer {
 </header>
 
 <main class="wrap">
+  <div class="cards" id="cards"></div>
   <div class="table-box">
     <table class="t4">
       <thead><tr>
@@ -220,9 +278,9 @@ aside.drawer {
       </tr></thead>
       <tbody id="tbody"></tbody>
     </table>
-    <div class="more" id="more" hidden><button type="button" id="more-btn">再显示 200 行</button></div>
-    <div id="empty" class="empty" hidden>没有符合条件的専攻。换个关键词，或点「清除筛选」。</div>
   </div>
+  <div class="more" id="more" hidden><button type="button" id="more-btn">再显示</button></div>
+  <div id="empty" class="empty" hidden>没有符合条件的専攻。换个关键词，或点「清除筛选」。</div>
 </main>
 
 <div class="scrim" id="scrim" hidden></div>
@@ -258,6 +316,9 @@ const T4_GROUPS = [
 const SEARCH_KEYS = ["编号", "大学", "研究科", "専攻", "领域", "所在地", "筆記内容", "口述/面接内容"];
 
 let ROWS = [], view = [], shown = 200, sortKey = "编号", sortDir = "asc";
+let groups = [], shownGroups = 20, mode = "cards";
+const folded = new Set();
+try { if (localStorage.getItem("t4-mode") === "table") mode = "table"; } catch (e) {}
 let current = null, tab = "md";
 const mdCache = {};
 const $ = id => document.getElementById(id);
@@ -330,17 +391,68 @@ function applyFilters() {
     if (sortKey === "大学") return (gkey(a) - gkey(b) || a["编号"].localeCompare(b["编号"])) * dir;
     return (String(a[sortKey] || "").localeCompare(String(b[sortKey] || ""), "ja") || a["编号"].localeCompare(b["编号"])) * dir;
   });
-  shown = 200;
+  // 按大学分组：大学按排序后第一次出现的顺序，组内再按研究科聚在一起
+  const byUni = new Map();
+  view.forEach(r => {
+    const u = r["编号"].slice(0, 3);
+    if (!byUni.has(u)) byUni.set(u, { uni: u, first: r, schools: new Map() });
+    const g = byUni.get(u), sc = r["研究科"] || "（研究科未填）";
+    if (!g.schools.has(sc)) g.schools.set(sc, []);
+    g.schools.get(sc).push(r);
+  });
+  groups = [...byUni.values()];
+  if (mode === "cards") view = groups.flatMap(g => [...g.schools.values()].flat());
+  view.forEach((r, i) => r._vi = i);
+  shown = 200; shownGroups = 20;
   render();
 }
 
+function mRowHtml(r) {
+  const st = r._only_md ? ` <span class="pill acc">仅md</span>` : (!r._md ? ` <span class="pill bad">缺md</span>` : "");
+  return `<div class="m-row${current === r ? " active" : ""}" role="button" tabindex="0" data-i="${r._vi}" data-id="${esc(r["编号"])}">
+    <span class="id">${esc(r["编号"])}</span>
+    <div class="m-main"><div class="major">${esc(r["専攻"])}${st}</div><div class="tags">${fields(r).map(f => `<span class="pill">${esc(f)}</span>`).join("")}</div></div>
+    <div class="m-ss">${r["春夏_出願时间"] || r["春夏_試験时间"] ? datesCell("春夏", r["春夏_出願时间"], r["春夏_試験时间"]) : '<span class="season">春夏</span><span class="sub">—</span>'}</div>
+    <div class="m-aw">${r["秋冬_出願时间"] || r["秋冬_試験时间"] ? datesCell("秋冬", r["秋冬_出願时间"], r["秋冬_試験时间"]) : '<span class="season">秋冬</span><span class="sub">—</span>'}</div>
+    <div class="m-flags">${r["過去問"] ? `<span class="pill ${kakoClass(r["過去問"])}">過去問 ${esc(r["過去問"])}</span>` : ""}${r["事前連絡"] ? `<span class="pill ${preClass(r["事前連絡"])}">事前連絡 ${esc(r["事前連絡"])}</span>` : ""}</div>
+  </div>`;
+}
+
+function cardHtml(g) {
+  const r = g.first, n = [...g.schools.values()].reduce((a, b) => a + b.length, 0), isFolded = folded.has(g.uni);
+  return `<section class="uc${isFolded ? " folded" : ""}" data-uni="${g.uni}">
+    <div class="uc-head">
+      <span class="grade" style="--gc:${gradeVar(r["推荐等级"])}" title="推荐等级 ${esc(r["推荐等级"])}">${esc(r["推荐等级"] || "?")}</span>
+      <div class="uc-title"><h3>${esc(r["大学"])}</h3>
+        <div class="sub">${g.uni} · ${esc(r["所在地"])}${r["高度人才加点对象"] === "是" ? " · 高度人才加点" : ""} · ${g.schools.size} 研究科 · ${n} 専攻</div></div>
+      <button type="button" class="uc-fold" aria-expanded="${!isFolded}">${isFolded ? "展开" : "收起"}</button>
+    </div>
+    <div class="uc-body"${isFolded ? " hidden" : ""}>${[...g.schools.entries()].map(([sc, rows]) =>
+      `<div class="sc"><div class="sc-name">${esc(sc)}<span class="n">${rows.length}</span></div>${rows.map(mRowHtml).join("")}</div>`).join("")}</div>
+  </section>`;
+}
+
 function render() {
-  $("tbody").innerHTML = view.slice(0, shown).map(rowHtml).join("");
-  $("more").hidden = view.length <= shown;
-  $("more-btn").textContent = `再显示 ${Math.min(200, view.length - shown)} 行（剩 ${view.length - shown}）`;
+  document.body.dataset.mode = mode;
+  $("mode-cards").setAttribute("aria-pressed", mode === "cards");
+  $("mode-table").setAttribute("aria-pressed", mode === "table");
+  const sv = `${sortKey}|${sortDir}`;
+  if ([...$("sort").options].some(o => o.value === sv)) $("sort").value = sv;
+  if (mode === "cards") {
+    $("tbody").innerHTML = "";
+    $("cards").innerHTML = groups.slice(0, shownGroups).map(cardHtml).join("");
+    const left = groups.length - shownGroups;
+    $("more").hidden = left <= 0;
+    $("more-btn").textContent = `再显示 ${Math.min(20, left)} 所大学（剩 ${left}）`;
+  } else {
+    $("cards").innerHTML = "";
+    $("tbody").innerHTML = view.slice(0, shown).map(rowHtml).join("");
+    $("more").hidden = view.length <= shown;
+    $("more-btn").textContent = `再显示 ${Math.min(200, view.length - shown)} 行（剩 ${view.length - shown}）`;
+  }
   $("empty").hidden = view.length > 0;
   const t4n = ROWS.filter(r => !r._only_md).length, mdn = ROWS.filter(r => r._md).length;
-  $("stats").innerHTML = `显示 <b>${view.length}</b> / ${ROWS.length} · 表4 ${t4n} 行 · md ${mdn} 篇`;
+  $("stats").innerHTML = `<b>${groups.length}</b> 所大学 · <b>${view.length}</b> / ${ROWS.length} 専攻 · 表4 ${t4n} 行 · md ${mdn} 篇`;
   document.querySelectorAll(".t4 th").forEach(th => th.dataset.dir = th.dataset.key === sortKey ? sortDir : "");
 }
 
@@ -417,8 +529,8 @@ async function showDetail() {
 function openDetail(r) {
   current = r;
   $("drawer").hidden = false; $("scrim").hidden = false;
-  document.querySelectorAll(".t4 tbody tr.active").forEach(tr => tr.classList.remove("active"));
-  const tr = document.querySelector(`.t4 tbody tr[data-id="${CSS.escape(r["编号"])}"]`);
+  document.querySelectorAll(".t4 tbody tr.active, .m-row.active").forEach(tr => tr.classList.remove("active"));
+  const tr = document.querySelector(`.t4 tbody tr[data-id="${CSS.escape(r["编号"])}"], .m-row[data-id="${CSS.escape(r["编号"])}"]`);
   if (tr) { tr.classList.add("active"); tr.scrollIntoView({ block: "nearest" }); }
   try { history.replaceState(null, "", "#" + r["编号"]); } catch (e) {}
   showDetail();
@@ -430,7 +542,11 @@ function closeDetail() {
 function step(d) {
   const i = view.indexOf(current) + d;
   if (i < 0 || i >= view.length) return;
-  if (i >= shown) { shown = i + 1; render(); }
+  if (mode === "table" && i >= shown) { shown = i + 1; render(); }
+  if (mode === "cards") {
+    const u = view[i]["编号"].slice(0, 3), gi = groups.findIndex(g => g.uni === u);
+    if (gi >= shownGroups || folded.has(u)) { folded.delete(u); shownGroups = Math.max(shownGroups, gi + 1); render(); }
+  }
   openDetail(view[i]);
 }
 
@@ -448,7 +564,29 @@ $("reset").addEventListener("click", () => {
   document.querySelectorAll("#grades button").forEach(b => b.setAttribute("aria-pressed", "false"));
   applyFilters();
 });
-$("more-btn").addEventListener("click", () => { shown += 200; render(); });
+$("more-btn").addEventListener("click", () => { mode === "cards" ? shownGroups += 20 : shown += 200; render(); });
+$("cards").addEventListener("click", e => {
+  const fold = e.target.closest(".uc-fold");
+  if (fold) {
+    const u = fold.closest(".uc").dataset.uni;
+    folded.has(u) ? folded.delete(u) : folded.add(u);
+    render(); return;
+  }
+  const row = e.target.closest(".m-row");
+  if (row) openDetail(view[+row.dataset.i]);
+});
+$("cards").addEventListener("keydown", e => {
+  const row = e.target.closest(".m-row");
+  if (row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(view[+row.dataset.i]); }
+});
+function setMode(m) {
+  mode = m;
+  try { localStorage.setItem("t4-mode", m); } catch (e) {}
+  applyFilters();
+}
+$("mode-cards").addEventListener("click", () => setMode("cards"));
+$("mode-table").addEventListener("click", () => setMode("table"));
+$("sort").addEventListener("change", () => { [sortKey, sortDir] = $("sort").value.split("|"); applyFilters(); });
 $("d-close").addEventListener("click", closeDetail);
 $("scrim").addEventListener("click", closeDetail);
 $("d-prev").addEventListener("click", () => step(-1));
@@ -483,6 +621,7 @@ fetch("data/rows.json").then(r => { if (!r.ok) throw new Error(r.status); return
   if (r) openDetail(r);
 }).catch(e => {
   $("stats").textContent = "数据没有读到";
-  $("tbody").innerHTML = `<tr><td colspan="11"><div class="notice">读取 data/rows.json 失败（${esc(e.message)}）。<br>在仓库根目录运行 <code>python3 web/build.py</code>，再运行 <code>python3 -m http.server -d web 8000</code>，打开 http://localhost:8000 。直接双击打开 html 文件时浏览器不允许读取数据。</div></td></tr>`;
+  document.body.dataset.mode = "cards";
+  $("cards").innerHTML = `<div class="notice">读取 data/rows.json 失败（${esc(e.message)}）。<br>在仓库根目录运行 <code>python3 web/build.py</code>，再运行 <code>python3 -m http.server -d web 8000</code>，打开 http://localhost:8000 。直接双击打开 html 文件时浏览器不允许读取数据。</div>`;
 });
 </script>

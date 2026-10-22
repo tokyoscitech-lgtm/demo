@@ -5,12 +5,17 @@ on:
     branches: [main]
     paths:
       - "4_考学信息一览.csv"
+      - "exam-monitor/**/*.md"
   workflow_dispatch:
     inputs:
       dry_run:
         description: "只预览差异，不写入飞书"
         type: boolean
         default: true
+      md_limit:
+        description: "md 最多处理几个改动文件（0=不限，试跑时填 1）"
+        type: string
+        default: "0"
 
 concurrency:
   group: sync-feishu
@@ -19,23 +24,40 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+  FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+  FEISHU_APP_TOKEN: V86DbzWm5akiKosZogxceiETnyc
+  FEISHU_TABLE_ID: tbl27hOqDLL0WKSX
+  FEISHU_FOLDER_TOKEN: OZmLfpbXcl7rfMdufbZctPhonIh
+  FEISHU_DOMAIN: https://ccn3ynd15sp4.feishu.cn
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+
 jobs:
   sync-table:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Sync CSV to Feishu Bitable
+      - name: Sync 表4 to Feishu Bitable
         env:
-          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
-          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          FEISHU_APP_TOKEN: V86DbzWm5akiKosZogxceiETnyc
-          FEISHU_TABLE_ID: tbl27hOqDLL0WKSX
           CSV_PATH: 4_考学信息一览.csv
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: python scripts/sync_feishu.py
+
+  sync-md:
+    needs: sync-table
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sync exam-monitor md to Feishu Drive
+        env:
+          MD_ROOT: exam-monitor
+          MD_LIMIT: ${{ inputs.md_limit || '0' }}
+        run: python scripts/sync_md.py

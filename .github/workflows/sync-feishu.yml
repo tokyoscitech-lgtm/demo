@@ -1,0 +1,41 @@
+name: Sync 表4 to Feishu
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "4_考学信息一览.csv"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只预览差异，不写入飞书"
+        type: boolean
+        default: true
+
+concurrency:
+  group: sync-feishu
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync-table:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync CSV to Feishu Bitable
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_APP_TOKEN: V86DbzWm5akiKosZogxceiETnyc
+          FEISHU_TABLE_ID: tbl27hOqDLL0WKSX
+          CSV_PATH: 4_考学信息一览.csv
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: python scripts/sync_feishu.py

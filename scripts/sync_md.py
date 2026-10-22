@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -72,22 +73,32 @@ def list_folder(tok, folder):
         page = d.get("next_page_token")
 
 
-def walk(tok, folder, prefix=""):
-    """返回 files{relpath: token}, folders{relpath: token}, dups[relpath]"""
+def nfc(s):
+    """统一成 NFC：Mac 上传的文件名常是 NFD（ジ = シ + ゛），看起来一样但字节不同"""
+    return unicodedata.normalize("NFC", s)
+
+
+def walk(tok, folder):
+    """逐层并发列目录。返回 files{NFC relpath: token}, folders{NFC relpath: token}, dups"""
     files, folders, dups = {}, {"": folder}, []
-    stack = [(folder, prefix)]
-    while stack:
-        ft, pre = stack.pop()
-        for f in list_folder(tok, ft):
-            rel = f"{pre}{f['name']}"
-            if f["type"] == "folder":
-                folders[rel] = f["token"]
-                stack.append((f["token"], rel + "/"))
-            elif f["type"] == "file":
-                if rel in files:
-                    dups.append(rel)
-                else:
-                    files[rel] = f["token"]
+    level = [(folder, "")]
+    with ThreadPoolExecutor(4) as ex:
+        while level:
+            nxt = []
+            for (ft, pre), items in zip(level, ex.map(lambda x: list_folder(tok, x[0]), level)):
+                for f in items:
+                    rel = pre + nfc(f["name"])
+                    if f["type"] == "folder":
+                        if rel in folders:
+                            dups.append(rel + "/")
+                        folders.setdefault(rel, f["token"])
+                        nxt.append((f["token"], rel + "/"))
+                    elif f["type"] == "file":
+                        if rel in files:
+                            dups.append(rel)
+                        else:
+                            files[rel] = f["token"]
+            level = nxt
     return files, folders, dups
 
 
@@ -163,7 +174,7 @@ def main():
 
     tok = get_token(app_id, app_secret)
 
-    local = {p.relative_to(md_root).as_posix(): p for p in sorted(md_root.rglob("*.md"))}
+    local = {nfc(p.relative_to(md_root).as_posix()): p for p in sorted(md_root.rglob("*.md"))}
     log(f"仓库 md：{len(local)} 个")
     remote, folders, dups = walk(tok, root_folder)
     remote_md = {k: v for k, v in remote.items() if k.endswith(".md")}

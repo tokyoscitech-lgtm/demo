@@ -1,0 +1,45 @@
+name: Check 表4 & md vs Feishu
+
+# 只读对照，不写入飞书：
+# - 表4：逐条对比（哪些编号不同、哪些字段不同；飞书多/少哪些编号）
+# - md：只看有无（只在仓库 / 只在云盘 / 云盘重复），并检查「编号」链接是否有效
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+  FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+  FEISHU_APP_TOKEN: V86DbzWm5akiKosZogxceiETnyc
+  FEISHU_TABLE_ID: tbl27hOqDLL0WKSX
+  FEISHU_FOLDER_TOKEN: OZmLfpbXcl7rfMdufbZctPhonIh
+  FEISHU_DOMAIN: https://ccn3ynd15sp4.feishu.cn
+  MD_ROOT: exam-monitor
+
+jobs:
+  check-table:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compare 表4 with Feishu Bitable (read-only)
+        env:
+          CSV_PATH: 4_考学信息一览.csv
+          DRY_RUN: "true"
+        run: python scripts/sync_feishu.py
+
+  check-md:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compare exam-monitor md with Feishu Drive (existence only)
+        run: python scripts/check_md.py

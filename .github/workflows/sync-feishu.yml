@@ -1,5 +1,6 @@
 name: Sync 表4 to Feishu
 
+# push 到 main：表4 变了就同步表格，md 变了就同步这次改动的 md —— 都是正式写入（不是 dry_run）
 on:
   push:
     branches: [main]
@@ -9,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "只预览差异，不写入飞书"
+        description: "只预览差异，不写入飞书（手动运行时才有这个选项）"
         type: boolean
-        default: true
+        default: false
       md_commit:
         description: "md：处理哪个 commit 改动的 md（留空=main 最新一次 commit）"
         type: string
@@ -31,35 +32,20 @@ env:
   FEISHU_TABLE_ID: tbl27hOqDLL0WKSX
   FEISHU_FOLDER_TOKEN: OZmLfpbXcl7rfMdufbZctPhonIh
   FEISHU_DOMAIN: https://ccn3ynd15sp4.feishu.cn
+  MD_ROOT: exam-monitor
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
 
 jobs:
-  sync-table:
+  changes:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Sync 表4 to Feishu Bitable
-        env:
-          CSV_PATH: 4_考学信息一览.csv
-        run: python scripts/sync_feishu.py
-
-  sync-md:
-    needs: sync-table
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    outputs:
+      table: ${{ steps.diff.outputs.table }}
+      md: ${{ steps.diff.outputs.md }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: List md changed in this push / commit
+      - id: diff
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
@@ -79,11 +65,51 @@ jobs:
             FROM="${TO}~1"
           fi
           echo "比较范围：$FROM .. $TO"
-          git -c core.quotepath=false diff --name-only --no-renames "$FROM" "$TO" -- exam-monitor/ > changed_md.txt
-          cat changed_md.txt
+          git -c core.quotepath=false diff --name-only --no-renames "$FROM" "$TO" > all_changed.txt
+          grep -E '^exam-monitor/.*\.md$' all_changed.txt > changed_md.txt || true
+          echo "--- 改动的 md ---"; cat changed_md.txt
+          # 手动运行时表格总是对比一次；push 时只在表4 改动时运行
+          if [ "$EVENT" != "push" ] || grep -qx '4_考学信息一览.csv' all_changed.txt; then
+            echo "table=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "table=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -s changed_md.txt ]; then echo "md=true" >> "$GITHUB_OUTPUT"; else echo "md=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: changed-md
+          path: changed_md.txt
+          if-no-files-found: ignore
 
+  sync-table:
+    needs: changes
+    if: needs.changes.outputs.table == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sync 表4 to Feishu Bitable
+        env:
+          CSV_PATH: 4_考学信息一览.csv
+        run: python scripts/sync_feishu.py
+
+  sync-md:
+    needs: [changes, sync-table]
+    if: ${{ !cancelled() && needs.changes.outputs.md == 'true' && needs.sync-table.result != 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: changed-md
       - name: Sync changed md to Feishu Drive
         env:
-          MD_ROOT: exam-monitor
           MD_CHANGED_LIST: changed_md.txt
         run: python scripts/sync_md.py

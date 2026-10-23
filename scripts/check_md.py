@@ -25,7 +25,7 @@ def list_folder(tok, folder):
 
 
 def walk(tok, root):
-    files, dups = {}, []
+    files, dups, all_tokens = {}, [], set()
     level = [(root, "")]
     with ThreadPoolExecutor(4) as ex:
         while level:
@@ -36,12 +36,13 @@ def walk(tok, root):
                     if f["type"] == "folder":
                         nxt.append((f["token"], rel + "/"))
                     elif f["type"] == "file" and rel.endswith(".md"):
+                        all_tokens.add(f["token"])
                         if rel in files:
                             dups.append(rel)
                         else:
                             files[rel] = f["token"]
             level = nxt
-    return files, dups
+    return files, dups, all_tokens
 
 
 def main():
@@ -50,7 +51,7 @@ def main():
     tok = get_token(env["FEISHU_APP_ID"], env["FEISHU_APP_SECRET"])
 
     local = {nfc(p.relative_to(md_root).as_posix()) for p in md_root.rglob("*.md")}
-    remote, dups = walk(tok, env["FEISHU_FOLDER_TOKEN"])
+    remote, dups, tokens = walk(tok, env["FEISHU_FOLDER_TOKEN"])
     only_repo = sorted(local - set(remote))
     only_drive = sorted(set(remote) - local)
     log(f"仓库 md {len(local)}，云盘 md {len(remote)}，两边都有 {len(local & set(remote))}")
@@ -66,7 +67,6 @@ def main():
             log(f"  ! {x}")
 
     # 「编号」链接检查
-    tokens = set(remote.values())
     key2rel = {}
     for rel in local:
         m = ID_RE.match(rel.rpartition("/")[2])

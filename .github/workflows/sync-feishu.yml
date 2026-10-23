@@ -12,10 +12,10 @@ on:
         description: "只预览差异，不写入飞书"
         type: boolean
         default: true
-      md_limit:
-        description: "md 最多处理几个改动文件（0=不限，试跑时填 1）"
+      md_commit:
+        description: "md：处理哪个 commit 改动的 md（留空=main 最新一次 commit）"
         type: string
-        default: "0"
+        default: ""
 
 concurrency:
   group: sync-feishu
@@ -50,14 +50,40 @@ jobs:
   sync-md:
     needs: sync-table
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Sync exam-monitor md to Feishu Drive
+
+      - name: List md changed in this push / commit
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          MD_COMMIT: ${{ inputs.md_commit }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ]; then
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              BEFORE="${AFTER}~1"
+            fi
+            FROM="$BEFORE"; TO="$AFTER"
+          else
+            TO="${MD_COMMIT:-HEAD}"
+            git cat-file -e "${TO}^{commit}"
+            FROM="${TO}~1"
+          fi
+          echo "比较范围：$FROM .. $TO"
+          git -c core.quotepath=false diff --name-only --no-renames "$FROM" "$TO" -- exam-monitor/ > changed_md.txt
+          cat changed_md.txt
+
+      - name: Sync changed md to Feishu Drive
         env:
           MD_ROOT: exam-monitor
-          MD_LIMIT: ${{ inputs.md_limit || '0' }}
+          MD_CHANGED_LIST: changed_md.txt
         run: python scripts/sync_md.py

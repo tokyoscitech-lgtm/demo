@@ -1,0 +1,36 @@
+name: Cleanup duplicate md in Feishu
+
+# 同名重复的 md：保留「编号」链接的那份，其余移到飞书回收站（可恢复）
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只列出计划，不删除"
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-feishu
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Trash unlinked duplicates
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_APP_TOKEN: V86DbzWm5akiKosZogxceiETnyc
+          FEISHU_TABLE_ID: tbl27hOqDLL0WKSX
+          FEISHU_FOLDER_TOKEN: OZmLfpbXcl7rfMdufbZctPhonIh
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python scripts/cleanup_dups.py

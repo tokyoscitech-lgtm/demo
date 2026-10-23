@@ -129,20 +129,33 @@ class Drive:
 
 # ---------------------------------------------------------------- 表格链接
 def link_of(value):
-    if isinstance(value, list):
-        for seg in value:
-            if isinstance(seg, dict) and seg.get("link"):
-                m = re.search(r"/file/([A-Za-z0-9]+)", seg["link"])
-                if m:
-                    return m.group(1)
+    """从「编号」（超链接字段 {"text","link"}，或旧的文本+链接段）里取 file token"""
+    segs = [value] if isinstance(value, dict) else (value if isinstance(value, list) else [])
+    for seg in segs:
+        if isinstance(seg, dict) and seg.get("link"):
+            m = re.search(r"/file/([A-Za-z0-9]+)", seg["link"])
+            if m:
+                return m.group(1)
     return None
 
 
+def key_text(value):
+    if isinstance(value, dict):
+        return (value.get("text") or "").strip()
+    if isinstance(value, list):
+        return "".join(s.get("text", "") for s in value if isinstance(s, dict)).strip()
+    return (value or "").strip()
+
+
 def set_link(tok, app, tbl, record_id, key, file_token, domain):
+    """「编号」须为超链接字段。写入后读回确认；任何 API 错误都返回 False（由调用方回滚）"""
     base = f"/bitable/v1/apps/{app}/tables/{tbl}/records/{record_id}"
-    call("PUT", base, tok, body={"fields": {KEY: [{"type": "url", "text": key,
-                                                   "link": f"{domain}/file/{file_token}"}]}})
-    got = call("GET", base, tok)
+    try:
+        call("PUT", base, tok, body={"fields": {KEY: {"text": key, "link": f"{domain}/file/{file_token}"}}})
+        got = call("GET", base, tok)
+    except SystemExit as e:
+        log(f"  ✗ 写入「编号」链接出错：{e}")
+        return False
     return link_of(got.get("record", {}).get("fields", {}).get(KEY)) == file_token
 
 
@@ -176,9 +189,9 @@ def main():
     by_key = {}
     for rec in list_records(tok, app, tbl, [KEY]):
         v = rec.get("fields", {}).get(KEY)
-        text = "".join(s.get("text", "") for s in v if isinstance(s, dict)) if isinstance(v, list) else (v or "")
-        if text.strip():
-            by_key.setdefault(text.strip(), (rec["record_id"], link_of(v)))
+        text = key_text(v)
+        if text:
+            by_key.setdefault(text, (rec["record_id"], link_of(v)))
 
     stats = {"替换": [], "新上传": [], "内容相同": [], "仓库已删除(未删云盘)": [],
              "修正链接": [], "表格无此编号": [], "失败": []}
@@ -223,18 +236,29 @@ def main():
             continue
 
         folder = folder or drive.folder(rel_dir, create=True)
-        new = drive.upload(folder, name, content)
+        try:
+            new = drive.upload(folder, name, content)
+        except SystemExit as e:
+            stats["失败"].append(rel)
+            log(f"  ✗ 上传失败：{rel}：{e}")
+            continue
         if rec:
             if not set_link(tok, app, tbl, rec[0], key, new, domain):
-                drive.trash(new)  # 回滚：保留旧文件和旧链接
+                try:
+                    drive.trash(new)  # 回滚：保留旧文件和旧链接
+                except SystemExit:
+                    log(f"  ⚠ 回滚时删除新文件失败，请手动删除云盘里多出的同名文件：{rel}")
                 stats["失败"].append(rel)
                 log(f"  ✗ 链接写入失败，已撤回新文件：{rel}")
                 continue
             by_key[key] = (rec[0], new)
         elif key:
             stats["表格无此编号"].append(rel)
-        if old:
-            drive.trash(old)
+        for t in olds:  # 旧版本（含以前失败遗留的同名文件）全部移到回收站
+            try:
+                drive.trash(t)
+            except SystemExit as e:
+                log(f"  ⚠ 旧文件移到回收站失败（不影响链接）：{rel}：{e}")
         stats[action].append(rel)
         log(f"  ✓ {action} {rel}")
 

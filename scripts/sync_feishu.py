@@ -170,6 +170,35 @@ def norm_existing(value, ftype):
     return str(value)
 
 
+def key_text(value):
+    """编号 可能是文本或超链接字段：只取显示文字"""
+    if isinstance(value, dict):
+        return (value.get("text") or "").strip()
+    if isinstance(value, list):
+        return "".join(s.get("text", "") if isinstance(s, dict) else str(s) for s in value).strip()
+    return (value or "").strip()
+
+
+def md_link(key):
+    """新增记录时，给 编号 找到对应 md 的云盘链接（超链接字段必须带 link）"""
+    domain = (os.environ.get("FEISHU_DOMAIN") or "").rstrip("/")
+    root = os.environ.get("FEISHU_FOLDER_TOKEN")
+    md_root = os.environ.get("MD_ROOT", "exam-monitor")
+    if not (domain and root):
+        return None
+    from pathlib import Path
+    hits = sorted(Path(md_root).rglob(f"{key}*.md")) if Path(md_root).is_dir() else []
+    if hits:
+        from sync_md import Drive, nfc  # 延迟导入，避免循环
+        rel = nfc(hits[0].relative_to(md_root).as_posix())
+        d = Drive(md_link.tok, root)
+        folder = d.folder(rel.rpartition("/")[0])
+        toks = d.files(folder, rel.rpartition("/")[2]) if folder else []
+        if toks:
+            return f"{domain}/file/{toks[0]}"
+    return f"{domain}/drive/folder/{root}"
+
+
 def comparable(v, ftype):
     if v is None:
         return None
@@ -238,11 +267,10 @@ def main():
     existing, dup_fs, blank = {}, [], 0
     for rec in recs:
         fields = rec.get("fields") or {}
-        key = norm_existing(fields.get(KEY), ftypes[KEY])
+        key = key_text(fields.get(KEY))
         if not key:
             blank += 1
             continue
-        key = key.strip()
         if key in existing:
             dup_fs.append(key)
             continue
@@ -252,11 +280,17 @@ def main():
     to_create, to_update, changes = [], [], []
     for key, want in desired.items():
         if key not in existing:
-            to_create.append({"fields": {k: v for k, v in want.items() if v is not None}})
+            fields = {k: v for k, v in want.items() if v is not None}
+            if ftypes[KEY] == T_URL:
+                md_link.tok = tok
+                fields[KEY] = {"text": key, "link": md_link(key) if not dry else "(dry-run)"}
+            to_create.append({"fields": fields})
             continue
         rid, have = existing[key]
         diff = {}
         for fn, v in want.items():
+            if fn == KEY:  # 编号 是匹配键，链接由 md 同步维护，这里从不改
+                continue
             if comparable(v, ftypes[fn]) != have.get(fn):
                 diff[fn] = v
         if diff:
@@ -268,7 +302,7 @@ def main():
     for key, fl in changes[:200]:
         log(f"  更新 {key}: {', '.join(fl)}")
     if to_create:
-        log("  新增：" + ", ".join(c["fields"][KEY] for c in to_create[:200]))
+        log("  新增：" + ", ".join(key_text(c["fields"][KEY]) for c in to_create[:200]))
     if orphans:
         log(f"⚠ 飞书有、CSV 没有（未删除）{len(orphans)} 条：{', '.join(orphans[:100])}")
     if blank:

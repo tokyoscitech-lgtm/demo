@@ -1,6 +1,7 @@
 name: Sync 表4 to Feishu
 
 # push 到 main：表4 变了就同步表格，md 变了就同步这次改动的 md —— 都是正式写入（不是 dry_run）
+# 本次 commit 从表4 删掉的编号：飞书表格里对应的行删除，云盘里对应的 md 移到回收站
 on:
   push:
     branches: [main]
@@ -78,6 +79,34 @@ jobs:
               | grep -v '^$' | sed 's#^\(exam-monitor/\)\{0,1\}#exam-monitor/#' >> changed_md.txt
             sort -u -o changed_md.txt changed_md.txt
           fi
+          # 本次 commit 从表4 删掉的编号 -> deleted_keys.txt；这些编号对应的 md -> deleted_md.txt
+          python3 - "$FROM" "$TO" <<'PY'
+          import csv, io, re, subprocess, sys
+          frm, to = sys.argv[1], sys.argv[2]
+          CSV, ROOT = "4_考学信息一览.csv", "exam-monitor/"
+          ID_RE = re.compile(r"^(\d{3}[A-Z]-\d{2})")
+          def keys(rev):
+              r = subprocess.run(["git", "show", f"{rev}:{CSV}"], capture_output=True)
+              if r.returncode:
+                  return None
+              rows = csv.DictReader(io.StringIO(r.stdout.decode("utf-8-sig")))
+              return {(x.get("编号") or "").strip() for x in rows} - {""}
+          old, new = keys(frm), keys(to)
+          gone = sorted(old - new) if old is not None and new is not None else []
+          mds = set()
+          if gone:
+              for rev in (frm, to):
+                  out = subprocess.run(["git", "-c", "core.quotepath=false", "ls-tree", "-r", "--name-only",
+                                        rev, "--", ROOT], capture_output=True, text=True).stdout
+                  for p in out.splitlines():
+                      m = ID_RE.match(p.rsplit("/", 1)[-1])
+                      if p.endswith(".md") and m and m.group(1) in gone:
+                          mds.add(p)
+          open("deleted_keys.txt", "w", encoding="utf-8").write("".join(k + "\n" for k in gone))
+          open("deleted_md.txt", "w", encoding="utf-8").write("".join(p + "\n" for p in sorted(mds)))
+          PY
+          echo "--- 表4 中删除的编号 ---"; cat deleted_keys.txt
+          echo "--- 对应要删除的 md ---"; cat deleted_md.txt
           echo "--- 要处理的 md ---"; cat changed_md.txt
           # 手动运行时表格总是对比一次；push 时只在表4 改动时运行
           if [ "$EVENT" != "push" ] || grep -qx '4_考学信息一览.csv' all_changed.txt; then
@@ -85,11 +114,14 @@ jobs:
           else
             echo "table=false" >> "$GITHUB_OUTPUT"
           fi
-          if [ -s changed_md.txt ]; then echo "md=true" >> "$GITHUB_OUTPUT"; else echo "md=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -s changed_md.txt ] || [ -s deleted_md.txt ]; then echo "md=true" >> "$GITHUB_OUTPUT"; else echo "md=false" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: changed-md
-          path: changed_md.txt
+          path: |
+            changed_md.txt
+            deleted_keys.txt
+            deleted_md.txt
           if-no-files-found: ignore
 
   sync-table:
@@ -102,9 +134,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: changed-md
       - name: Sync 表4 to Feishu Bitable
         env:
           CSV_PATH: 4_考学信息一览.csv
+          DELETED_KEYS_LIST: deleted_keys.txt
         run: python scripts/sync_feishu.py
 
   sync-md:
@@ -123,4 +159,5 @@ jobs:
       - name: Sync changed md to Feishu Drive
         env:
           MD_CHANGED_LIST: changed_md.txt
+          MD_DELETED_LIST: deleted_md.txt
         run: python scripts/sync_md.py

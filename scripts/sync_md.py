@@ -9,6 +9,7 @@
     （飞书 API 不能覆盖已上传文件，只能换新文件，所以 file token 会变）
   - 云盘里没有：按 大学/研究科/ 结构建文件夹并上传，再补上「编号」链接
 - 仓库里已删除：只记日志，不删除云盘文件
+另外，MD_DELETED_LIST 列出的 md（本次 commit 从表4 删掉的编号对应的 md）：云盘里的同名文件移到回收站。
 列表以外的 md 一律不碰。只用 Python 标准库。
 
 环境变量：
@@ -18,6 +19,7 @@
   FEISHU_DOMAIN                       如 https://ccn3ynd15sp4.feishu.cn
   MD_ROOT                             默认 exam-monitor
   MD_CHANGED_LIST                     改动文件列表路径（必填）
+  MD_DELETED_LIST                     要从云盘删除的 md 列表路径（可省略）
   DRY_RUN                             "true" 时只打印计划
 """
 import json
@@ -171,15 +173,24 @@ def main():
     if not all([app_id, app_secret, app, tbl, root_folder, domain, list_path]):
         sys.exit("缺少环境变量")
 
-    changed = []
-    for line in Path(list_path).read_text(encoding="utf-8").splitlines():
-        p = line.strip()
-        if p.startswith(md_root + "/") and p.endswith(".md") and p not in changed:
-            changed.append(p)
+    def read_list(path):
+        out = []
+        if path and Path(path).exists():
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                p = line.strip()
+                if p.startswith(md_root + "/") and p.endswith(".md") and p not in out:
+                    out.append(p)
+        return out
+
+    deleted = read_list(env.get("MD_DELETED_LIST"))
+    changed = [p for p in read_list(list_path) if p not in deleted]
     log(f"本次改动的 md：{len(changed)} 个")
     for p in changed:
         log(f"  {p}")
-    if not changed:
+    log(f"表4 删除编号对应、要从云盘删除的 md：{len(deleted)} 个")
+    for p in deleted:
+        log(f"  {p}")
+    if not changed and not deleted:
         log("没有 md 改动，跳过。")
         return
 
@@ -194,7 +205,31 @@ def main():
             by_key.setdefault(text, (rec["record_id"], link_of(v)))
 
     stats = {"替换": [], "新上传": [], "内容相同": [], "仓库已删除(未删云盘)": [],
-             "修正链接": [], "表格无此编号": [], "失败": []}
+             "修正链接": [], "表格无此编号": [], "云盘已删除": [], "仓库仍有(请手动删)": [], "失败": []}
+
+    for path in deleted:
+        rel = nfc(path[len(md_root) + 1:])
+        rel_dir, _, name = rel.rpartition("/")
+        if Path(path).exists():
+            stats["仓库仍有(请手动删)"].append(rel)
+            log(f"  ⚠ 编号已从表4 删除，但仓库里还有这个 md：{rel}")
+        folder = drive.folder(rel_dir)
+        toks = drive.files(folder, name) if folder else []
+        if not toks:
+            log(f"  - 云盘里本来就没有：{rel}")
+            continue
+        if dry:
+            log(f"  · 将从云盘删除 {rel}（{len(toks)} 个）")
+            stats["云盘已删除"].append(rel)
+            continue
+        try:
+            for t in toks:
+                drive.trash(t)
+            stats["云盘已删除"].append(rel)
+            log(f"  ✓ 云盘已删除（移到回收站）{rel}")
+        except SystemExit as e:
+            stats["失败"].append(rel)
+            log(f"  ✗ 云盘删除失败：{rel}：{e}")
 
     for path in changed:
         rel = nfc(path[len(md_root) + 1:])

@@ -2,7 +2,8 @@
 """把 4_考学信息一览.csv 同步到飞书多维表格。
 
 - 唯一键：编号。有就更新（只更新有变化的记录），没有就新增。
-- CSV 里没有、飞书里有的记录：不删除，只在日志里列出。
+- 本次 commit 从 CSV 里删掉的编号（DELETED_KEYS_LIST 列出）：飞书里对应的行删除。
+- 其余 CSV 里没有、飞书里有的记录：不删除，只在日志里列出。
 - 飞书里编号为空的记录：跳过。
 - 只用 Python 标准库，无需 pip install。
 
@@ -10,6 +11,8 @@
   FEISHU_APP_ID / FEISHU_APP_SECRET   必填（GitHub Secrets）
   FEISHU_APP_TOKEN / FEISHU_TABLE_ID  多维表格 app_token 和 table_id
   CSV_PATH                            默认 4_考学信息一览.csv
+  DELETED_KEYS_LIST                   本次从 CSV 删除的编号列表文件（一行一个，可省略）
+  MAX_DELETE                          一次最多删除多少行，超过则不删并报错（默认 50，防止 CSV 损坏误删）
   DRY_RUN                             "true" 时只打印差异，不写入
 """
 import csv
@@ -296,9 +299,26 @@ def main():
         if diff:
             to_update.append({"record_id": rid, "fields": diff})
             changes.append((key, list(diff)))
-    orphans = sorted(k for k in existing if k not in desired)
+    # 本次 commit 删掉的编号 -> 删除飞书对应行（仍在 CSV 里的不删）
+    gone = []
+    del_path = os.environ.get("DELETED_KEYS_LIST")
+    if del_path and os.path.exists(del_path):
+        with open(del_path, encoding="utf-8") as f:
+            gone = sorted({ln.strip() for ln in f if ln.strip()} - set(desired))
+    to_delete = [(k, existing[k][0]) for k in gone if k in existing]
+    max_del = int(os.environ.get("MAX_DELETE", "50"))
+    if len(to_delete) > max_del:
+        sys.exit(f"要删除 {len(to_delete)} 行，超过上限 MAX_DELETE={max_del}，为防误删已中止。"
+                 f"确认无误请调高 MAX_DELETE 后重跑：{', '.join(k for k, _ in to_delete[:50])}")
+    deleted_keys = {k for k, _ in to_delete}
+    orphans = sorted(k for k in existing if k not in desired and k not in deleted_keys)
 
-    log(f"新增 {len(to_create)}，更新 {len(to_update)}，未变化 {len(desired) - len(to_create) - len(to_update)}")
+    log(f"新增 {len(to_create)}，更新 {len(to_update)}，删除 {len(to_delete)}，"
+        f"未变化 {len(desired) - len(to_create) - len(to_update)}")
+    if to_delete:
+        log("  删除：" + ", ".join(k for k, _ in to_delete))
+    if gone and len(to_delete) < len(gone):
+        log("  （表4 删除但飞书本来就没有：" + ", ".join(k for k in gone if k not in existing) + "）")
     for key, fl in changes[:200]:
         log(f"  更新 {key}: {', '.join(fl)}")
     if to_create:
@@ -318,14 +338,20 @@ def main():
             call("POST", base + "/batch_create", tok, body={"records": to_create[i:i + 500]})
         for i in range(0, len(to_update), 500):
             call("POST", base + "/batch_update", tok, body={"records": to_update[i:i + 500]})
+        ids = [rid for _, rid in to_delete]
+        for i in range(0, len(ids), 500):
+            call("POST", base + "/batch_delete", tok, body={"records": ids[i:i + 500]})
         log("写入完成。")
 
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(f"### 飞书同步{'（试运行）' if dry else ''}\n\n"
-                    f"| 新增 | 更新 | 飞书有CSV无 | 编号为空 |\n|---|---|---|---|\n"
-                    f"| {len(to_create)} | {len(to_update)} | {len(orphans)} | {blank} |\n\n")
+                    f"| 新增 | 更新 | 删除 | 飞书有CSV无 | 编号为空 |\n|---|---|---|---|---|\n"
+                    f"| {len(to_create)} | {len(to_update)} | {len(to_delete)} | {len(orphans)} | {blank} |\n\n")
+            if to_delete:
+                f.write("<details><summary>删除明细</summary>\n\n"
+                        + "".join(f"- `{k}`\n" for k, _ in to_delete) + "\n</details>\n\n")
             if changes:
                 f.write("<details><summary>更新明细</summary>\n\n")
                 for key, fl in changes[:500]:

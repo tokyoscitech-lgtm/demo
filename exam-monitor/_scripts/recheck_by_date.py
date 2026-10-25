@@ -3,7 +3,8 @@
 
 在 demo 根目录运行：
   python3 exam-monitor/_scripts/recheck_by_date.py pick [--n 6] [--before 2026-10-20] [--claim]
-      选出表4中更新日期早于 --before 的条目，按编号顺序取前 n 个研究科（编号前4位），
+      选出表4中更新日期早于 --before 的条目，按编号顺序取前 n 个研究科（编号前4位；
+      _scripts/.recheck_priority.json 的 {"prefixes": ["012", ...]} 里的前缀优先），
       跳过 3 小时内已被其他轮次认领的研究科；--claim 时登记认领。输出 JSON。
   python3 exam-monitor/_scripts/recheck_by_date.py preview <md相对exam-monitor路径...>
       不写表，按当前 md 解析出表4各列（忽略日期核对缓存），并和表4现值对照。
@@ -74,8 +75,18 @@ def cmd_pick(a):
         g = r['编号'][:4]
         groups.setdefault(g, []).append(r)
     total = len(groups)
+    # 优先清单（.recheck_priority.json 的 prefixes，按大学编号或研究科编号前缀匹配）排在前面
+    try:
+        pri = json.load(open(os.path.join(S, '.recheck_priority.json'), encoding='utf-8')).get('prefixes', [])
+    except Exception:
+        pri = []
+    def rank(g):
+        for i, pf in enumerate(pri):
+            if g.startswith(pf):
+                return i
+        return len(pri)
     picked = []
-    for g, rs in groups.items():
+    for g, rs in sorted(groups.items(), key=lambda kv: (rank(kv[0]), kv[0])):
         if g in claims:
             continue
         picked.append({'研究科编号': g, '大学': rs[0]['大学'], '研究科': rs[0]['研究科'],

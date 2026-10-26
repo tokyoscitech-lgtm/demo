@@ -1,0 +1,954 @@
+#!/usr/bin/env python3
+"""exam_csv.py — 从 exam-monitor 的専攻 md 生成/更新「4_考学信息一览.csv」，并挑选需要补充信息的専攻。
+
+用法（在 demo 目录下，或用 --root/--csv 指定）:
+  python3 exam_csv.py pick   [--n 5] [--skip-hours 72]   # 输出本轮要补充的 md 相对路径（每行一个）
+  python3 exam_csv.py update <md相对路径> [...]           # 只把这些専攻的行按 md 最新内容重写进 CSV（按専攻编号匹配）
+  python3 exam_csv.py rebuild                              # 按全部 md 重建整张 CSV
+  python3 exam_csv.py missing <md相对路径>                 # 显示该専攻在 CSV 中缺哪些列
+  python3 exam_csv.py seed   [--write]                       # 以 3_大学研究科専攻一覧.csv（根表）为准：给在用但还没有 md 的専攻建空白骨架 md，并补进 index.md 与 CSV（不加 --write 只预览）
+  python3 exam_csv.py pick   --group uni [--claim --claim-hours 0.9]
+                                                           # 按大学编号顺序，取第一个还有没跑过（骨架/旧格式）専攻的大学，输出该校全部这类専攻（一轮一所大学）
+  python3 exam_csv.py pick   --group gakka [--max-majors 8] [--claim]  # 同上，但一轮一个研究科
+  python3 exam_csv.py mark <md相对路径> [...] [--unresolved "秋冬日程(未公布),事前連絡(官方未记载)"]
+                                                           # 登记本轮已检查（及穷尽来源仍补不上的列）到 _scripts/.fill_state.json
+md 有两种写法，都能解析：范本格式（无 frontmatter，元数据取自 H1 标题与标题下的链接列表，检查时间取自「最新更新：」）
+与旧格式（带 YAML frontmatter）。
+md 相对路径以 exam-monitor/ 为根，例如 001東京大学/001C工学系研究科/001C-07電気系工学専攻.md
+"""
+import glob,os,re,csv,collections,unicodedata,sys,argparse,datetime,hashlib,json
+N=lambda x:unicodedata.normalize('NFC',x)
+D=r'(?:(20\d\d|令和\s*\d+|R\d+)\s*[/.年\-]\s*)?(\d{1,2})\s*[/.月]\s*(\d{1,2})\s*日?(?:\s*[(（][^)）]{1,3}[)）])?'
+RNG=re.compile(r'(?<![A-Za-z0-9.])'+D+r'(?!\d(?!\d?:)|[群番号点分倍名人問題])'+r'(?:\s*(?:\d{1,2}:\d{2})?\s*[–—~～〜\-－]\s*(?:'+D+r'|(\d{1,2})\s*日|(\d{1,2})(?![\d/.月:：時]))\s*)?')
+def yr(y,m):
+    if y:
+        y=y.replace(' ','')
+        if y.startswith(('令和','R')): y=str(2018+int(re.sub(r'\D','',y)))
+        return int(y)
+    return 2027 if m<=3 else 2026
+def ranges(seg):
+    out=[]
+    for mt in RNG.finditer(seg):
+        if seg[mt.end():].startswith('（非独立出願）'): continue
+        y1,m1,d1,y2,m2,d2,d3,d4=mt.groups(); d3=d3 or d4
+        m1,d1=int(m1),int(d1)
+        if not(1<=m1<=12 and 1<=d1<=31): continue
+        # skip things like "6選2" handled by regex; skip scores like 2.5
+        Y=yr(y1,m1)
+        if Y<2026 or Y>2027: continue
+        if m2: e=f'{int(m2)}/{int(d2)}'
+        elif d3: e=f'{m1}/{int(d3)}'
+        else: e=None
+        s=f'{m1}/{d1}'
+        out.append(((Y,m1,d1), s+('–'+e if e and e!=s else '')))
+    return out
+def rnd(key):
+    # September examinations belong to summer; application windows follow their exam round.
+    Y,m,d=key
+    return '夏' if 3<=m<=9 else '冬'
+TAG=[('予備選考','予備選考'),('借用文学','借用文学'),('予備審査','予審'),('事前審査','予審'),('資格審査','予審'),('资格审查','予審'),('特别','特別'),('推薦','推薦'),('社会人','社会人'),('留学生','留学生'),('渡日前','渡日前'),('特別','特別'),('学内','学内'),('内部','学内')]
+SPL=re.compile(r'[；;。\n·、→]|／| / |，|\|')
+def split_schedule(txt):
+    # Keep route lists and weekday annotations inside parentheses intact.
+    depth=0;start=0;out=[];cuts={m.start():m.end() for m in SPL.finditer(txt)};i=0
+    while i<len(txt):
+        ch=txt[i]
+        if ch in '（(【[':depth+=1
+        elif ch in '）)】]':depth=max(0,depth-1)
+        if i in cuts and depth==0:
+            out.append(txt[start:i]);start=cuts[i];i=cuts[i];continue
+        i+=1
+    out.append(txt[start:]);return out
+def classify(app_txt, exam_txts):
+    """app_txt: 出願 cell text; exam_txts: list of (label, text) for 筆記/口述"""
+    def nz(x):
+        x=x or ''
+        x=re.sub(r'(截至|截止到|as of)\s*20\d\d[-/年]\d{1,2}[-/月]\d{1,2}日?',lambda mt: mt.group(0) if re.match(r'\s*(?:[（(][^）)]*[）)])?\s*(?:\d{1,2}:\d{2}\s*)?(?:必达|必着|邮戳|消印|締切)',x[mt.end():]) else '',x)  # 「未公布（截至YYYY-MM-DD）」里的确认日期不是日程
+        x=re.sub(r'(20\d\d)-(\d{1,2})-(\d{1,2})',r'\1/\2/\3',x or '')
+        x=re.sub(r'(?:上一年度|上年度|上次|往年)[^；;。\n]*','',x)
+        x=re.sub(r'[（(][^（）()]*?(?:预备日|预备|予備日|误写|公告)[^（）()]*[）)]','',x)
+        x=x.replace('特別試験','特別選抜').replace('一般試験','一般選抜')
+        x=re.sub(r'(?:出願资格事前审查|出願資格の?事前審査)[^。；;\n]*','',x)
+        x=re.sub(r'出願日程','日程',x)            # 「出願日程A」是轮次名，不是出願期间
+        x=re.sub(r'特[別别]口述試[験验]','特別選抜',x)  # 「特別口述試験」是选拔区分名，不是考试日关键词
+        return re.sub(r'([～~〜–—])\s*(\d{1,2})-(\d{1,2})',r'\1\2/\3',x)
+    app_txt=nz(app_txt); exam_txts=[(l,nz(t)) for l,t in exam_txts]
+    res={'夏出願':[], '夏試験':[], '冬出願':[], '冬試験':[]}
+    contexts={}
+    classify.last_pairing=[]
+    def add(kind,label,seg):
+        for key,s in ranges(seg):
+            tag=next((v for k,v in TAG if k in seg and not (v in('社会人','留学生') and '一般' in seg)),'')
+            note=next((v for k,v in [('书类选考，无统一笔面试','书类选考'),('面试个别通知，分季待确认','个别通知/分季待确认'),('面试个别通知，归春夏','个别通知/春夏'),('面试个别通知，归秋冬','个别通知/秋冬'),('随时个别选拔，跨季实施','随时/跨季个别')] if k in seg),'') if kind=='出願' else ''
+            if kind=='試験' and not label and re.search(r'具体两日|指定两日|其中两日|选两日|いずれか[２2]日',seg): note='择二日/待通知'
+            val=(f'{label}' if label else '')+s+(f'({tag})' if tag else '')+(f'[{note}]' if note else '')
+            contexts[(kind,key,val)]=seg
+            # Exams set round grouping; applications are paired below.
+            r=rnd(key)
+            lst=res[r+kind]
+            if val not in [x[1] for x in lst]: lst.append((key+({'筆':0,'口':1}.get(label,0),),val))
+    for seg in split_schedule(app_txt or ''):
+        if re.search(r'出願前手続|事前登録|事前登记|資格[認认]定|资格[认認]定|資格審査|资格审查|資格事前審査|资格事前审查|预审|予備審査|检定料(?!证明)|検定料(?!証明)|汇款|推荐信|推薦状|机构直送|原件',seg) and not re.search(r'正式出願|正式出愿',seg): continue
+        if re.search(r'合格|手続|入学手続|説明会|提出期限|TOEFL|スコア|掲載|公表|公開',seg) and not re.search(r'出願',seg): continue
+        if re.search(r'試験日|筆記試験|学力試験|口述試験|口頭試問|面接日|選抜日|試験は|試験：|試験:|入試日|考试|^\s*(試験|筆記|口述|面接|口頭)',seg) and not re.search(r'出願',seg):
+            add('試験','',seg)
+        else:
+            # segment may contain both 出願 and 試験 parts: split at 試験 keyword
+            m=re.search(r'(試験日|筆記試験|学力試験|口述試験|口頭試問|面接日|選抜日|試験は|試験：|試験:|入試日|考试)',seg)
+            if m and '出願' in seg[:m.start()]:
+                add('出願','',seg[:m.start()]); add('試験','',seg[m.start():])
+            else: add('出願','',seg)
+    for label,txt in exam_txts:
+        for seg in split_schedule(txt or ''):
+            if re.search(r'合格|手続|説明会|スコア|提出|予備日|预备日|预备\s*(?:20\d\d[/年-])?\d{1,2}[/月]\d{1,2}|リハーサル|彩排|发表|発表|公告|邮件通知|メール通知',seg): continue
+            if 'TOEFL' in seg and not re.search(r'専門|笔试|筆記',seg): continue
+            if '出願' in re.sub(r'出願(?:予定者|者|資格|前)','',seg): add('出願','',seg); continue
+            lab=label
+            if re.search(r'筆記|筆答|学力',seg) and label!='筆': lab='筆'
+            elif re.search(r'口述|面接|口頭',seg) and label!='筆': lab='口'
+            add('試験',lab,seg)
+    # Match applications to the corresponding subsequent exam, preferring explicit round labels.
+    def round_sig(txt):
+        sig={}
+        trans=str.maketrans({'Ⅰ':'1','Ⅱ':'2','Ⅲ':'3','一':'1','二':'2','三':'3','１':'1','２':'2','３':'3'})
+        txt=txt.translate(trans)
+        for kind,pat in [('期',r'第?([123])期'),('次',r'第([123])次(?!選考|选考|試験|试验|審査|审查)'),('回',r'第([1-9])回'),('日程',r'([ABCＡＢＣ])日程|日程([ABCＡＢＣ])'),('月',r'(?<![\d/])(\d{1,2})月(?:实施|実施|试|試|募集)')]:
+            hits=re.findall(pat,txt)
+            if hits:sig[kind]=set(''.join(x) if isinstance(x,tuple) else x for x in hits)
+        return sig
+    import datetime as _dt
+    exams=[(season,it) for season in ('夏','冬') for it in res[season+'試験']]
+    apps=[it for season in ('夏','冬') for it in res[season+'出願']]
+    res['夏出願']=[];res['冬出願']=[]
+    for it in apps:
+        key4,val=it;key=key4[:3];start=_dt.date(*key)
+        mm=re.search(r'–(\d+)/(\d+)',val)
+        end=_dt.date(key[0],int(mm.group(1)),int(mm.group(2))) if mm else start
+        if end<start:end=end.replace(year=end.year+1)
+        app_sig=round_sig(contexts.get(('出願',key,val),''));candidates=[]
+        for season,exam in exams:
+            ek,ev=exam;date=_dt.date(*ek[:3]);gap=(date-end).days
+            if gap<0 or gap>240:continue
+            es=round_sig(contexts.get(('試験',ek[:3],ev),''))
+            shared=set(app_sig)&set(es)
+            if any(not(app_sig[k]&es[k]) for k in shared):continue
+            score=sum(bool(app_sig[k]&es[k]) for k in shared)
+            candidates.append((-score,gap,season))
+        if re.search(r'\[(?:书类选考|个别通知/(?:分季待确认|春夏|秋冬)|随时/跨季个别)\]',val): candidates=[]
+        if candidates and min(candidates)[1]==0: candidates=[]  # Same-day deadlines require official time/round verification.
+        season=min(candidates)[2] if candidates else rnd(key)
+        if '[个别通知/春夏]' in val: season='夏'
+        elif '[个别通知/秋冬]' in val: season='冬'
+        res[season+'出願'].append(it)
+        if '[随时/跨季个别]' in val: res[('冬' if season=='夏' else '夏')+'出願'].append(it)
+        classify.last_pairing.append({'application':val,'start':start.isoformat(),'end':end.isoformat(),'season':season,'matched':bool(candidates),'gap_days':min(candidates)[1] if candidates else None})
+    def dd(v):
+        v=sorted(v); out=[]
+        def span(it):
+            (Y,m,d,_),val=it
+            mm=re.search(r'–(\d+)/(\d+)',val)
+            end=(Y,int(mm.group(1)),int(mm.group(2))) if mm else (Y,m,d)
+            if end<(Y,m,d): end=(Y+1,end[1],end[2])
+            return (Y,m,d),end
+        for it in v:
+            a,b=span(it); pre=re.match(r'[筆口]?',it[1]).group(0); tg=re.search(r'\(.*\)$',it[1])
+            cov=any(o is not it and re.match(r'[筆口]?',o[1]).group(0)==pre and re.sub(r'^[筆口]?\d+/\d+(?:–\d+/\d+)?','',o[1])==re.sub(r'^[筆口]?\d+/\d+(?:–\d+/\d+)?','',it[1]) and span(o)[0]<=a and b<=span(o)[1] and span(o)!=(a,b) for o in v)
+            if not cov: out.append(it[1])
+        return '・'.join(out)
+    return {k:dd(v) for k,v in res.items()}
+
+NEG=r'没有要求|未要求|没有规定|不要(?!」|と)|求められていません|指定されていません|要求されていません|課さない|課していない|課されていない|必要ありません|不要求|无需|不需要|なし(?!」)|記載(は|が)?(ありません|なし|を確認できませんでした|されていません)|不問'
+UNK=r'未確認|要確認|個別確認|未取得|待確認|待确认|未获取|精査待ち'
+REJ=r'没有列出|没有把|没有列|未列|不在|不含|不包括|不认|不受理|不承认|不接受|不可|不能用|対象外|认められ|認められ|認めない|受け付けない'
+def sents(txt): return [s for s in re.split(r'[。\n；;]',txt) if s.strip()]
+# 判断一句话是否说明有学内英语考试（2026-10-23 修正）  # patched-20261023-ENG
+# hard=必须考学内英语；soft=有学内英语考试但可用外部成绩代替/免考；oral=面接中用英语口述；None=不算
+GK_RE=r'(英語|英语|外国語)[^。，,；;]{0,8}(筆記|筆答|試験を実施|笔试|考试)|学内.{0,4}英語|英語.{0,4}学力試験'
+GK_EXT=r'其他的?(英语|英語)(考试|試験|检定|検定)|外部[^。，,；;]{0,6}(英语|英語)?(考试|試験|检定|検定|成绩|成績|スコア)|(英语|英語)(外部)?(能力)?的?(考试|試験|检定|検定)(的)?(成绩|成績|スコア|证明|証明)|(英语|英語)以外部'
+GK_SKIP=r'其他\d?コース|其他[^。；;]{0,6}(コース|専攻|专攻|课程)|参考（|参考：|日语能力证明|日本語能力|只适用|不适用于本|与本専攻无关|与本专攻无关|无关|上次|曾有|曾提|过旧|不沿用|往年|是否|未能核实|考试语言|作答语言|答题语言'
+GK_NEG=r'(没有|不设|不考|无|不另|不单|不再|不自己|不举行|不实施|不出|不用|取消|学内不|考场内不)[^，。；;]{0,14}(英语|英語)|(英语|英語)[^，。；;]{0,4}(不|没)|課さない|課していない|実施しない|行わない|実施せず|不接受|不受理|补交|補交|按\s*\d+\s*分'
+GK_HARD=r'不能代替|不可代替|不得代替|不能免|不可免|没有[^。；;]{0,12}免考|没有[^。；;]{0,12}免除|不收[^。；;]{0,14}代替|所有人参加|全员参加|全員|必须参加|必考|都要考|(英语|英語)(包含在|含在|は)[^。；;]{0,10}(笔试|筆記)|含英语|含英語|含めて出題'
+GK_HARD2=r'(不接受|不把|不将|不能用|不可用|不认可)[^。；;]{0,24}(代替|替代)'
+GK_SOFT=r'(可以|可用|可选|也可|也能|可在)[^。；;]{0,60}(代替|替代|免考|免除|免笔试)|二选一|交不出|申请免考|符合条件[^。；;]{0,12}免|或参加|任选'
+def gk_kind(s):
+    if re.search(GK_SKIP,s): return None
+    if re.search(GK_HARD2,s) and '英' in s: return 'hard'
+    if re.search(r'(英語|英语)[^。，；;]{0,4}(口述|口頭|口试)|学内で英語の口述',s): return 'oral'
+    s2=re.sub(GK_EXT,'',s)
+    if not re.search(GK_RE,s2): return None
+    if re.search(GK_HARD,s): return 'hard'
+    if re.search(GK_NEG,s2): return None
+    if re.search(GK_SOFT,s): return 'soft'
+    if re.search(r'代替|替代|换算|代わり|免除|免考',s2): return None
+    return 'hard'
+def eng(txt, written=''):
+    tests=[];mins=[];neg=unk=gakunai=False;hard=soft=oral=False
+    # 写明本コース不考英语、不计英语成绩的，直接算「不要」
+    ss=sents(txt)
+    # 第一句就写明本専攻不考英语、不计英语成绩的，直接算「不要」（后面只对某条选拔路线说“不考英语”的不算）
+    if ss and re.search(r'不考英语|不考英語|不课英语|「英語」を課していない|英語を課さない',ss[0]): return '不要'
+    # 第一句就写明不用交英语成绩的，算「不要」（后面提到研究科共通规定里的考试名不算）
+    has_gk={gk_kind(x) for x in ss[1:] if not re.search(r'^\s*(变更点|変更点)|上一年度|上年度|去年|以前',x)}  # patched-20261023-ENG
+    if ss and re.search(NEG,ss[0]) and not re.search(r'TOEFL|TOEIC|IELTS',re.sub(r'(不需要|不要|无需)[^。；]*','',ss[0])) : return ('学内英語試験' if 'hard' in has_gk else '学内英語（成绩可免）') if has_gk&{'hard','soft'} else ('面接内英語口述' if 'oral' in has_gk else '不要')
+    for s in ss:
+        if re.search(r'^\s*(变更点|変更点)|上一年度|上年度|去年|以前',s): continue  # 讲往年情况的句子不算本年度要求
+        if re.search(UNK,s) or re.search(r'可否|要否',s): unk=True; continue
+        if re.search(NEG,s): neg=True; continue
+        # 「IELTS 不认」「TOEIC IP 不受理」这类写明不接受的考试不算可用考试
+        ok=' '.join(c for c in re.split(r'[，,]',s) if not re.search(REJ,c))
+        for k,pat in (('TOEFL',r'TOEFL'),('TOEIC',r'TOEIC'),('IELTS',r'IELTS'),('英検',r'英検|実用英語技能'),('Duolingo',r'Duolingo')):
+            if re.search(pat,ok) and k not in tests: tests.append(k)
+        for m in re.finditer(r'(TOEFL|TOEIC|IELTS)[^。；\d]{0,18}?(\d{1,3}(?:\.\d)?)\s*(?:点|分)?\s*(?:以上|\+)',s):
+            v=f'{m.group(1)}{m.group(2)}+'
+            if v not in mins: mins.append(v)
+        g=gk_kind(s)  # patched-20261023-ENG
+        if g=='hard': hard=True
+        elif g=='soft': soft=True
+        elif g=='oral': oral=True
+    for ln in written.split('\n'):
+        if re.search(r'外国語（英語）|英語（筆記）|英語\s*\d+:\d+|英語[:：]?\s*筆記',ln):
+            if re.search(r'免除|免考|で免|可免',ln): soft=True
+            else: hard=True
+    gakunai=hard or soft
+    tag='学内英語' if hard else '学内英語（成绩可免）'
+    if tests:
+        o='/'.join(tests)+'提出'+(f'（{"・".join(mins[:3])}）' if mins else '')
+        if gakunai: o+='＋'+tag
+        return o
+    if gakunai: return '学内英語試験' if hard else tag
+    if oral: return '面接内英語口述'
+    if neg: return '不要'
+    if unk or not txt.strip(): return '未確認'
+    return '详见要項'
+def jpn(txt):
+    items=[];neg=unk=False
+    for s in sents(txt):
+        if re.search(UNK,s) or re.search(r'可否|要否',s): unk=True; continue
+        if re.search(NEG,s): neg=True; continue
+        m=re.findall(r'N[1-5]',s)
+        if re.search(r'JLPT|日本語能力試験',s) or m:
+            lv=sorted(set(m))
+            v='JLPT '+lv[-1]+'以上' if lv else 'JLPT'
+            items=[i for i in items if not i.startswith('JLPT')] if lv else items
+            if not any(i.startswith('JLPT') for i in items): items.append(v)
+        if re.search(r'EJU|日本留学試験',s) and 'EJU' not in items: items.append('EJU')
+    if items:
+        return '/'.join(items)+'提出'
+    if neg: return '不要'
+    if unk or not txt.strip(): return '未確認'
+    return '详见要項'
+def kakomon(txt):
+    if not txt.strip(): return '未確認'
+    o=[]
+    if re.search(r'参考[^。；]{0,24}(过去问|過去問)',txt): return '网上公开(参考他コース)'
+    NP=r'非公開|公開していない|公開しない|不公开|未公开|公開なし|无公开|公開されていない'
+    PB=r'公開|公开|掲載|ダウンロード|线上|線上|online|オンライン|HP|ホームページ|web|Web|网页|页'
+    cl=[c for c in re.split(r'[。；;]',txt) if c.strip()]
+    # 「夏期试题网页公开。冬入试的过去问不公开」这种部分不公开的，按公开算；整体都不公开才算不公开
+    pub=any(re.search(PB,c) and not re.search(NP,c) for c in cl)
+    if re.search(NP,txt) and not pub: return '不公开'
+    if pub: o.append('网上公开')
+    if re.search(r'窓口|閲覧|請求|郵送|申請|领取|配布|配付|入手|购买|購入',txt): o.append('窗口/申请领取')
+    if o: return '・'.join(o)
+    if re.search(UNK+r'|待公布|见',txt): return '未確認'
+    return '详见要項'
+def jizen(lines):
+    # A reviewed route-specific summary is authoritative; keep its scope instead of collapsing it to a generic label.
+    for line in lines:
+        scoped=re.match(r'^事前(?:連絡|联系)要否[:：]\s*分路线[:：]\s*(.*?)(?:。依据[:：]|$)',line)
+        if scoped and scoped.group(1).strip():
+            return scoped.group(1).strip().rstrip('。')
+    # 有「事前連絡要否：」这一条时只看这一条，避免被别处提到联系教员的句子带偏
+    key=[l for l in lines if re.match(r'事前(連絡|联系)要否',l)]
+    txt=' '.join(key or lines)
+    if not txt.strip(): return ''
+    lead=re.match(r'(?:事前(?:連絡|联系)要否[:：]\s*)?(必须|必須|推荐|推奨|不要|无需|不募集)(（留学生(?:特别选拔)?必须）)?',txt)  # patched-20261023-JIZEN  # patched-20261023-JIZEN2  # patched-20261023-JIZEN3
+    if lead: return {'必须':'必须','必須':'必须','推荐':'推荐','推奨':'推荐','不募集':'不募集'}.get(lead.group(1),'不要')+(lead.group(2) or '')
+    if re.match(r'(?:事前(?:連絡|联系)要否[:：]\s*)?(未确认|未確認)',txt): return ''
+    if re.search(r'没有要求|未要求|不要求|无需|不用(提前)?联系',txt) and not re.search(r'必須|必须|必ず',txt): return '不要'
+    if re.search(r'没有要求|未要求',txt) and re.search(r'必須|必须',txt): return '部分必须(按选拔区分/科目，详见md)'
+    req=re.search(r'必須|必ず|必要(?!ありません|はない|なし)|须|必须|こと。?$|しなければ|内諾',txt); no=re.search(r'不要|不需要|必要ありません|必要はない',txt)
+    if req and no: return '部分必须(按选拔区分/科目，详见md)'
+    if req: return '必须'
+    if re.search(r'望ましい|推奨|推荐|建议|勧め|強く',txt): return '推荐'
+    if re.search(r'不要|不需要|必要ありません|必要はない',txt): return '不要'
+    return '见专攻HP' if re.search(r'见|HP|ページ',txt) else '要联系(详见要項)'
+
+def clean(s):
+    s=re.sub(r'\[([^\]]*)\]\([^)]*\)',r'\1',s)
+    s=s.replace('**','').replace('`','')
+    s=re.sub(r'<!--.*?-->','',s,flags=re.S)
+    s=re.sub(r'\s+',' ',s).strip()
+    return s
+def cap(s,n=350): return s if len(s)<=n else s[:n]+'…'
+def section(t,pat):  # patched-20261022-P3
+    # ##/### 标题：与原来相同，到下一个 ## 或 ### 为止；#### 标题：到下一个 ##～#### 为止
+    m=re.search(r'^(#{2,4}) [^\n]*'+pat+r'[^\n]*\n',t,re.M)
+    if not m: return ''
+    lv=max(len(m.group(1)),3); rest=t[m.end():]
+    e=re.search(r'^#{2,%d} '%lv,rest,re.M)
+    return rest[:e.start()] if e else rest
+def bullets(s):
+    out=[]
+    for l in s.split('\n'):
+        l=l.strip()
+        if l.startswith(('- ','* ')): out.append(clean(l[2:]))
+        elif l.startswith('>'): continue
+    return [x for x in out if x and x not in('—','-')]
+def table(s):
+    rows=[]
+    for l in s.split('\n'):
+        l=l.strip()
+        if l.startswith('|'):
+            c=[clean(x) for x in l.strip('|').split('|')]
+            if all(re.fullmatch(r':?-+:?',x) or x=='' for x in c): continue
+            rows.append(c)
+    return rows
+CAT=[('選抜日',('選抜日',)),('募集要項',('募集要項','要項')),('出願期間',('出願','日程')),('口述面接',('口述','面接','口頭')),
+     ('筆記試験',('筆記','試験日','選抜日','選考','筆答','試験','選抜内容')),('合格発表',('合格',)),('説明会',('説明会',)),('過去問',('過去問',))]
+
+def head_meta(t):
+    """范本格式（无 frontmatter）：H1「大学 · 研究科 · 専攻｜课程（年度）」+ 标题下的「- [名称](URL)」链接列表"""
+    d={}; links=[]
+    m=re.search(r'^# (.+)$',t,re.M)
+    if not m: return d,links
+    h=m.group(1).strip()
+    mm=re.match(r'(.*?)\s*[｜|]\s*([^（(]+?)\s*(?:[（(]([^）)]*)[）)])?\s*$',h)
+    left=mm.group(1) if mm else h
+    parts=[x.strip() for x in re.split(r'\s+[·・]\s+',left,maxsplit=2)]
+    for k,v in zip(('university','faculty','program'),parts): d[k]=v
+    if mm: d['level']=mm.group(2).strip(); d['year']=(mm.group(3) or '').strip()
+    body=t[m.end():]; e=re.search(r'^## ',body,re.M)
+    links=re.findall(r'^[-*]\s*\[([^\]]+)\]\((https?://[^)\s]+)\)',body[:e.start()] if e else body,re.M)
+    u=re.search(r'最新更新[:：]\s*(\d{4}-\d{2}-\d{2}(?:[ T]\d{1,2}:\d{2})?)',t)
+    if u: d['last_checked']=u.group(1)
+    return d,links
+def load_index(root):
+    idx={}
+    p=os.path.join(root,'index.md')
+    try: lines=open(p,encoding='utf-8').read().split('\n')
+    except Exception: return idx
+    for line in lines:
+        if line.startswith('|') and '.md' in line:
+            c=[x.strip() for x in line.strip().strip('|').split('|')]
+            if len(c)>=9: idx[N(c[6])]=dict(no=c[0],tag=c[4])
+    return idx
+DATE_COLUMNS=('春夏_出願时间','春夏_試験时间','秋冬_出願时间','秋冬_試験时间')
+AUDIT_OFF=False  # 只更新非日期列时不需要日期核对数据  # patched-20261023-AUDIT
+def reviewed_dates(t,p):
+    """Read date audit data kept outside the user's Markdown notes."""
+    if AUDIT_OFF: return None
+    cachep=os.path.join(os.path.dirname(os.path.abspath(__file__)),'.reviewed_dates.json')
+    if not os.path.exists(cachep):return None
+    with open(cachep,encoding='utf-8') as f:cache=json.load(f)
+    if cache.get('version')!=1:raise ValueError('不支持的日期核对数据版本')
+    ident=re.match(r'\d{3}[A-Z]-\d{2}(?:-\d+)?',os.path.basename(p))
+    item=cache.get('entries',{}).get(ident.group() if ident else '')
+    if item is None:return None
+    if item.get('source_sha256')!=hashlib.sha256(t.encode('utf-8')).hexdigest():
+        raise ValueError('日期核对数据的来源已修改；请复核四列并更新_scripts/.reviewed_dates.json，再执行update')
+    out=item.get('columns',{})
+    if set(out)!=set(DATE_COLUMNS) or not all(isinstance(v,str) for v in out.values()):
+        raise ValueError('日期核对数据必须包含四个完整日期列')
+    return {c:out[c] for c in DATE_COLUMNS}
+
+# 日程表格子末尾的来源注明（予告、订正、某某页等）只是出处，括号里的日期不是出願/考试日  # patched-20261022-P1a
+SRCNOTE=re.compile(r'[（(][^（）()]*?(?:予告|告知|お知らせ|訂正|订正|公告|公表|掲載|页|ページ|資料|资料|说明会|説明会|发布|公布)[^（）()]*[）)]')
+def strip_src(v): return SRCNOTE.sub('',v)
+def reviewed_eng(t,p):  # patched-20261023-REV
+    # 英語列的人工核对值存在 _scripts/.reviewed_eng.json；笔记全文哈希一致时才使用，笔记改过就回到自动解析
+    cachep=os.path.join(os.path.dirname(os.path.abspath(__file__)),'.reviewed_eng.json')
+    try:
+        with open(cachep,encoding='utf-8') as f: cache=json.load(f)
+    except Exception: return None
+    ident=re.match(r'\d{3}[A-Z]-\d{2}(?:-\d+)?',os.path.basename(p))
+    item=cache.get('entries',{}).get(ident.group() if ident else '')
+    if not item or item.get('source_sha256')!=hashlib.sha256(t.encode('utf-8')).hexdigest(): return None
+    return item.get('英語')
+def reviewed_col(t,p,fname,key):  # patched-20261023-JIZEN
+    # 某列的人工核对值（_scripts/<fname>），笔记全文哈希一致时才使用
+    cachep=os.path.join(os.path.dirname(os.path.abspath(__file__)),fname)
+    try:
+        with open(cachep,encoding='utf-8') as f: cache=json.load(f)
+    except Exception: return None
+    ident=re.match(r'\d{3}[A-Z]-\d{2}(?:-\d+)?',os.path.basename(p))
+    item=cache.get('entries',{}).get(ident.group() if ident else '')
+    if not item or item.get('source_sha256')!=hashlib.sha256(t.encode('utf-8')).hexdigest(): return None
+    return item.get(key)
+def build_row(p, idx):
+    t=open(p,encoding='utf-8').read()
+    miss=0
+    fm=re.match(r'---\n(.*?)\n---',t,re.S); fmt=fm.group(1) if fm else ''
+    g=lambda k:(re.search(r'^'+k+r':[ \t]*(.*)$',fmt,re.M) or [None,''])[1].split('#')[0].strip().strip('"\'') if k!='last_checked' else (re.search(r'^last_checked:[ \t]*(.*)$',fmt,re.M) or [None,''])[1].strip().strip('"')
+    srcs=dict(re.findall(r'^\s+([^:\n]+):\s*["\']?(https?://[^\s"\']+)',fmt,re.M))
+    hd,links=head_meta(t)
+    if not fm:
+        _g=g; g=lambda k:hd.get(k,'')
+        srcs=collections.OrderedDict(links)
+    cur=[(k,v) for k,v in srcs.items() if not k.startswith('参考')]  # 「参考：往年要项」不当作本年度来源
+    nyushi=next((v for k,v in cur if re.search(r'入試|入试',k) and '実績' not in k),'') or next(iter(srcs.values()),'')
+    yk=[v for k,v in cur if re.search(r'要項|要项',k)]
+    yoko=next((v for v in yk if v.lower().split('?')[0].endswith('.pdf')),'') or (yk[0] if yk else '')
+    r=collections.OrderedDict()
+    ix=idx.get(N(p),{})
+    if not ix: miss+=1
+    # 编号 = 専攻编号（3_大学研究科専攻一覧.csv），取自 md 文件名前缀
+    _m=re.match(r'(\d{3}[A-Z]-\d{2}(?:-\d+)?)',N(os.path.basename(p))) or re.match(r'(\d{3}[A-Z]-\d{2}(?:-\d+)?)',N(os.path.basename(os.path.dirname(p)))); r['#']=_m.group(1) if _m else '';r['大学']=N(g('university'));r['等级']=ix.get('rank','');r['研究科']=g('faculty');r['専攻']=g('program')
+    r['课程']=g('level');r['年度']=g('year');r['领域tag']=ix.get('tag','');r['优先级']=g('priority')
+    # schedule
+    sch=section(t,r'📋')
+    sd=collections.defaultdict(list); raw=collections.defaultdict(list)
+    nconf=0
+    for c in table(sch)[1:]:
+        if len(c)<2: continue
+        if '✅' in (c[2] if len(c)>2 else ''): nconf+=1
+        lab=c[0]; val=c[1]; st=c[2] if len(c)>2 else ''
+        if re.search(r'出願前手続|資格審査|资格审查|事前登録|検定料|检定料',lab): continue
+        if val in('—','-',''): 
+            if '未' in st: continue
+        for cat,keys in CAT:
+            if any(k in lab for k in keys):
+                pre='' if ('✅' in st or st=='') else f'[{st}] '
+                txt=(lab+'：' if lab not in(cat,'口述/面接','口述・面接') and cat!='募集要項' else '')+val
+                sd[cat].append(pre+txt); raw[cat].append(lab+'：'+strip_src(val)); break  # patched-20261022-P1b
+    rd=classify('；'.join(raw['出願期間']),[('筆','；'.join(raw['筆記試験'])),('口','；'.join(raw['口述面接'])),('','；'.join(raw['選抜日']))])
+    ctx=re.sub(r'(?:上一年度|上年度|上次|往年)[^；;。\n]*','',sch+'\n'+section(t,r'⏰'))
+    for ssn,pat in (('夏',r'夏入試|夏季|8月入試|第1期|第一次|1次|前期|A日程|一般選抜'),('冬',r'冬入試|冬季入試|冬期|2月入試|第2期|第2回|二次募集|2次募集|後期募集|後期日程|B日程|秋入試|10月入試')):
+        if not rd[ssn+'出願'] and not rd[ssn+'試験']:
+            if ssn=='冬' and re.search(r'(冬[季期]?|第[2２]次|二次|2月|下期)[^。；\n|]{0,50}(未公布|未公表|未定|未能读取|未確認|未确认)',ctx): rd['冬出願']='有(日程待确认)'
+            elif ssn=='冬' and re.search(r'\|\s*冬入試\s*\|\s*(なし|没有|无|本年度不实施)[^|]*\|[^|]*✅',sch): rd['冬出願']='无冬考'
+            elif ssn=='冬' and re.search(r'(冬|2月|第2期|二次|2次|B日程|後期)[^。；\n]{0,14}(募集なし|実施なし|はなし|：なし|:なし|なし[（(]|取消|実施しない|不実施|実施せず|行わない|不实施|不举行|不募集|没有募集|没有冬考|无冬考)',ctx): rd['冬出願']='无冬考'
+            elif re.search(pat,ctx) and ssn=='冬': rd['冬出願']='有(日程待确认)'
+    if any(len(c)>2 and c[0]=='募集停止' and '✅' in c[2] for c in table(sch)[1:]):
+        rd={'夏出願':'不募集（改組）','夏試験':'','冬出願':'不募集（改組）','冬試験':''}
+        classify.last_pairing=[]
+    r['春夏_出願时间']=rd['夏出願'];r['春夏_試験时间']=rd['夏試験'];r['秋冬_出願时间']=rd['冬出願'];r['秋冬_試験时间']=rd['冬試験']
+    audited=reviewed_dates(t,p)
+    if audited:r.update(audited)
+    r['⏰临近提醒']=cap('；'.join(bullets(section(t,r'⏰'))),250)
+    for cat,_ in CAT: r[cat]=cap(' ／ '.join(sd[cat]))
+    eng_full=section(t,r'英語要件') or section(t,r'語学')
+    r['英語要件']=cap(' '.join(bullets(eng_full)),300)
+    jp=section(t,r'日本語要件'); r['日本語要件']=cap(' '.join(bullets(jp)),200)
+    wr=section(t,r'筆記')
+    subj=[c[0]+('：'+c[1] if len(c)>1 and c[1] not in('—','') else '') for c in table(wr)[1:] if c and c[0] not in('—','')]
+    r['筆記科目']=cap(' ／ '.join(subj) or ' '.join(bullets(wr)),350)
+    oral=section(t,r'口述')
+    of=next((b for b in bullets(oral) if '官方形式' in b or '公式' in b or '形式' in b),'') or (bullets(oral)[0] if bullets(oral) else '')
+    r['口述形式']=cap(re.sub(r'^(官方形式|公式形式)[:：]\s*','',of),250)
+    det=section(t,r'📝')
+    cap_lines=[b for b in bullets(section(t,r'定員')+section(t,r'募集人員')+det) if re.search(r'定員|募集人員|募集人员|名额|名',b) and not b.startswith('事前')]
+    r['定員']=cap(cap_lines[0] if cap_lines else '',150)
+    hist=table(section(t,r'過年度'))
+    r['最近入試実績']=''
+    if len(hist)>1:
+        h=hist[0]; last=hist[1]
+        if last[0] not in('—','-',''): r['最近入試実績']=cap(' '.join(f'{a}:{b}' for a,b in zip(h,last) if b and b not in('—','-') and not a.startswith(('出典','データ'))),180)
+    elif bullets(section(t,r'過年度')): r['最近入試実績']=cap(bullets(section(t,r'過年度'))[0],180)
+    elig=section(t,r'出願資格')
+    r['出願資格']=cap(' '.join(b for b in bullets(elig) if b not in cap_lines),250)
+    pre=[b for b in bullets(t) if '事前連絡' in b or '事前相談' in b or '事前コンタクト' in b]
+    r['事前連絡']=cap(re.sub(r'^事前連絡要否[:：]\s*','',pre[0]) if pre else '',200)
+    r['英語']=eng('\n'.join(bullets(eng_full)), '\n'.join(raw['筆記試験'])+wr)
+    rv=reviewed_eng(t,p)  # patched-20261023-REV
+    if rv is not None: r['英語']=rv
+    r['日本語']=jpn('\n'.join(bullets(jp)))
+    rjp=reviewed_col(t,p,'.reviewed_jp.json','日本語')  # patched-20261023-JP
+    if rjp is not None: r['日本語']=rjp
+    r['過去問_s']=kakomon(' '.join(raw['過去問'])+' '+' '.join(b for b in bullets(t) if ('過去問' in b or '过去问' in b) and not re.match(r'20\d\d-\d\d-\d\d',b)))  # 不看更新日志行
+    jl=[b for b in bullets(t) if not re.match(r'20\d\d-\d',b) and not re.search(r'英語実施|英語で実施',b) and re.search(r'事前連絡|事前相談|事前コンタクト|(事前|出願前|出願に先立).{0,20}(連絡|相談|面談|内諾|联系)|联系导师|与志望教员',b)]
+    r['事前連絡_s']=jizen(jl)
+    rj=reviewed_col(t,p,'.reviewed_jizen.json','事前連絡')  # patched-20261023-JIZEN
+    if rj is not None: r['事前連絡_s']=rj
+    tei=''
+    for b in cap_lines:
+        m=re.search(r'(\d+)\s*名',b)
+        if m: tei='定員'+m.group(1); break
+        if '若干名' in b: tei='定員若干名'; break
+    bai=''
+    if len(hist)>1 and hist[1][0] not in('—','-',''):
+        h=hist[0]; last=dict(zip(h,hist[1]))
+        yr=next((v for k,v in last.items() if '年度' in k),hist[1][0])
+        ap=next((v for k,v in last.items() if '志願' in k),''); ps=next((v for k,v in last.items() if '合格' in k),'')
+        rt=next((v for k,v in last.items() if '倍率' in k),'')
+        if not tei:
+            q=next((v for k,v in last.items() if '募集' in k or '定員' in k),'')
+            if q and q not in('—','-'): tei='定員'+q.replace('名','')
+        parts=[x for x in [f'志願{ap}' if ap and ap not in('—','-') else '', f'合格{ps}' if ps and ps not in('—','-') else '', rt if rt and rt not in('—','-') else ''] if x]
+        if parts: bai=f'{yr}: '+' '.join(parts)
+    elif bullets(section(t,r'過年度')):
+        b0=bullets(section(t,r'過年度'))[0]
+        if re.search(r'\d',b0): bai=cap(b0,80)
+    if not bai:
+        # 范本格式：「📊 入试数据」表（年度｜项目｜数值｜来源），取第一行
+        dt=[c for c in table(section(t,r'📊'))[1:] if len(c)>=3 and c[0] not in('—','-','') and c[2] not in('—','-','')]
+        if dt: bai=cap(f'{dt[0][0]}: {dt[0][1]} {dt[0][2]}',90)
+    r['定員/倍率']=' | '.join(x for x in [tei,bai] if x)
+    r['日程确认数(/7)']=nconf
+    r['入試情報URL']=nyushi;r['募集要項URL']=yoko
+    # 募集要項列：优先要項PDF/页面URL；无URL时退回📋表中「募集要項」行的文字
+    r['募集要項']=yoko or cap(re.sub(r'^\[[^\]]*\]\s*','',sd['募集要項'][0]) if sd['募集要項'] else '',200)
+    r['last_checked']=g('last_checked');r['md文件']=N(p)
+    return r
+
+COLS=['编号', '大学', '推荐等级', '所在地', '高度人才加点对象', '研究科', '専攻', '包含学科', '春夏_出願时间', '春夏_試験时间', '秋冬_出願时间', '秋冬_試験时间', '英語', '日本語', '筆記内容', '口述/面接内容', '事前連絡', '定員/倍率', '募集要項', '更新日期']
+SRC={'更新日期':'last_checked','编号':'#','包含学科':'领域tag','筆記内容':'筆記科目','口述/面接内容':'口述形式','事前連絡':'事前連絡_s'}
+def normalize_field_tags(raw,ident=''):
+    config_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),'field_taxonomy.json')
+    with open(config_path,encoding='utf-8') as f:config=json.load(f)
+    if config.get('version')!=1:raise ValueError('不支持的领域分类规则版本')
+    allowed=config['allowed'];aliases=config.get('aliases',{});drop=config.get('non_discipline_labels',[])
+    override=config.get('overrides',{}).get(ident)
+    vals=list(override) if override is not None else []
+    if override is None:
+        for token in re.split(r'[;；,，、]',raw or ''):
+            token=token.strip()
+            if not token:continue
+            if token in allowed:vals.append(token)
+            elif token in aliases:vals.extend(aliases[token])
+            elif token in drop:continue
+            else:raise ValueError('领域标签未分类：'+ident+' '+token+'；请先核对研究方向并更新index及分类规则')
+    if any(v not in allowed for v in vals):raise ValueError('领域规则包含未授权类别：'+ident)
+    if raw and not vals:raise ValueError('宽泛领域无法自动分类：'+ident+' '+raw+'；请核对研究方向并更新index或项目映射')
+    return ';'.join(v for v in allowed if v in set(vals))
+
+def research_kw(t):  # patched-20261022-P5a
+    # 笔记里有「- 研究方向关键词：…」一行时以它为准；否则取「### 研究室 / 指導教員」各研究室行第二段（｜之间）的关键词，去重后用、连接
+    m=re.search(r'^- 研究方向关键词：[ \t]*(.+)$',t,re.M)
+    if m: return cap(clean(m.group(1)),500)
+    s=section(t,r'研究室 / 指導教員') or section(t,r'研究室')
+    kws=[]
+    for l in s.split('\n'):
+        st=l.strip()
+        if not st.startswith(('- ','* ')): continue
+        b=st[2:]
+        if re.match(r'(事前(連絡|联系)要否|说明)',b) or '｜' not in b: continue
+        d=clean(b.split('｜')[1])
+        if not d or re.search(r'本年度不募集|^研究室$',d): continue
+        for k in re.split(r'[、，,；;]',d):
+            k=k.strip(' 。.')
+            if k and k not in kws: kws.append(k)
+    return cap('、'.join(kws),500)
+def finalize(r):
+    for k,v in list(r.items()):
+        if isinstance(v,str) and re.fullmatch(r'(未確認です。?|未確認|—|-)',v): r[k]=''
+    for k in ('筆記科目','口述形式'):
+        if '要確認' in r[k] and len(r[k])<70: r[k]=''
+        if re.fullmatch(r'(详|詳)?见.{0,14}(要項|要项|页|HP)。?',r[k].strip()): r[k]=''  # 「见募集要項」这类占位不算已填
+    c=r['课程']
+    r['课程']=('博士後期' if ('後期' in c or c.startswith('博士課程')) and '前期' not in c and '修士' not in c else '専門職' if '専門職' in c else '博士一貫' if '一貫' in c and '博士' in c else '修士')
+    checked=re.search(r'(?<!\d)(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)',r.get('last_checked',''))
+    r['last_checked']=datetime.date(*map(int,checked.groups())).isoformat() if checked else ''
+    r['领域tag']=normalize_field_tags(r.get('领域tag',''),r.get('#',''))
+    return collections.OrderedDict((k,r.get(SRC.get(k,k),'')) for k in COLS)
+def key(row):
+    # 以専攻编号为主键（同一 大学+研究科+専攻 名下可能有多个领域/コース md）；无编号时退回名称
+    no=row.get('编号','')
+    return ('#',no) if re.match(r'\d{3}[A-Z]-\d{2}',no or '') else (N(row['大学']),N(row['研究科']),N(row['専攻']))
+def excluded_program_ids():
+    p=os.path.join(os.path.dirname(os.path.abspath(__file__)),'program_scope.json')
+    if not os.path.exists(p):return set()
+    with open(p,encoding='utf-8') as f:scope=json.load(f)
+    if scope.get('version')!=1:raise ValueError('不支持的课程范围版本')
+    return set(scope.get('excluded',{}))
+
+def md_files(root):
+    fs=[]
+    for p in glob.glob(os.path.join(root,'[0-9]*','**','*.md'),recursive=True):
+        rel=os.path.relpath(p,root)
+        if md_id(rel) in excluded_program_ids():continue
+        b=os.path.basename(rel)
+        if b.startswith('_') or '旧専攻対応表' in b or '過去問' in rel: continue
+        if re.search(r'_冬入試|_冬入试',N(b)): continue  # 冬入试单独成篇的补充笔记不占 CSV 行（日期仍写在主 md 的日程表里）
+        # 「一个専攻一个文件夹」结构：専攻笔记存为 <専攻编号+名>/README.md
+        if 'README' in b and not re.match(r'\d{3}[A-Z]-\d{2}',N(os.path.basename(os.path.dirname(rel)))): continue
+        fs.append(rel)
+    return sorted(fs,key=N)
+def read_ok(root,rel):
+    try: open(os.path.join(root,rel),encoding='utf-8').read(); return True
+    except Exception: return False
+def row_for(root,rel,idx):
+    cwd=os.getcwd(); os.chdir(root)
+    try: return finalize(build_row(rel,idx))
+    finally: os.chdir(cwd)
+KEEP=('推荐等级','所在地','高度人才加点对象','包含学科','大学','研究科','専攻')
+def _readable(p):
+    try: open(p,encoding='utf-8-sig').read(200); return True
+    except Exception: return False
+OLD_COLS={'领域':'包含学科','夏_出願': '春夏_出願时间', '夏_試験': '春夏_試験时间', '冬_出願': '秋冬_出願时间', '冬_試験': '秋冬_試験时间', '春夏_出願': '春夏_出願时间', '春夏_試験': '春夏_試験时间', '秋冬_出願': '秋冬_出願时间', '秋冬_試験': '秋冬_試験时间'}  # Accept all previous date headers; always write the current user-defined schema.
+def read_csv(path):
+    with open(path,encoding='utf-8-sig',newline='') as f: rows=list(csv.DictReader(f))
+    for r in rows:
+        for a,b in OLD_COLS.items():
+            if a in r:
+                v=r.pop(a)
+                if not r.get(b): r[b]=v
+    return rows
+UNI_CSV='1_大学ランク一覧.csv'
+def uni_lookup(csvdir):
+    """从 1_大学ランク一覧.csv 读 推荐等级(旧列名 内部推荐等级) / 本部所在地 / 高度人才加点对象（按大学编号，退回大学名）"""
+    p=os.path.join(csvdir,UNI_CSV); by_no={}; by_name={}
+    try: rs=read_csv(p)
+    except Exception: return by_no,by_name
+    for r in rs:
+        v=(r.get('本部所在地','').strip(), r.get('高度人才加点对象','').strip(), (r.get('推荐等级') or r.get('内部推荐等级') or '').strip())
+        if r.get('大学编号'): by_no[r['大学编号'].strip()]=v
+        if r.get('大学'): by_name[N(r['大学'].strip())]=v
+    return by_no,by_name
+MAJ_CSV='3_大学研究科専攻一覧.csv'
+def major_lookup(csvdir):
+    """3_大学研究科専攻一覧.csv：専攻编号 -> (研究科, 専攻, tag)"""
+    try: rs=read_csv(os.path.join(csvdir,MAJ_CSV))
+    except Exception: return {}
+    return {r['専攻编号'].strip():(N(r.get('研究科','').strip()),N(r.get('専攻','').strip()),r.get('tag','').strip()) for r in rs if r.get('専攻编号')}
+_SUF=r'[（(](?:修士課程|修士|博士前期課程|博士前期|博士課程前期|博士後期課程|博士後期|博士課程)[）)]'
+def unify_major(n4,n3,sub=False):
+    """以3表専攻名为准，保留コース/領域等细分：去掉「（修士課程）」类后缀"""
+    n4=re.sub(r'\s+',' ',re.sub(_SUF,'',N(n4 or ''))).strip()
+    if not n3: return n4
+    if not n4 or n4==n3: return n3
+    if n4.startswith(n3):
+        rest=n4[len(n3):].strip()
+        rest=re.sub(r'[·・、]?(?:修士課程|修士|博士前期課程|博士前期|博士課程前期)','',rest)
+        rest=re.sub(r'^[（(](.*)[）)]$',r'\1',rest).strip()
+        return (n3+' '+rest).strip() if rest else n3
+    if n3 in n4: return n3 if not sub else n4
+    return n3+' '+n4 if sub else n3
+def enrich(path,rows):
+    by_no,by_name=uni_lookup(os.path.dirname(path))
+    maj=major_lookup(os.path.dirname(path))
+    for r in rows:
+        no=r.get('编号') or ''
+        m=re.match(r'(\d{3}[A-Z]-\d{2})(-\d+)?',no)
+        if m and m.group(1) in maj:
+            fac,name,tag=maj[m.group(1)]
+            if fac: r['研究科']=fac
+            r['専攻']=unify_major(r.get('専攻',''),name,sub=bool(m.group(2)))
+            if not r.get('包含学科'): r['包含学科']=normalize_field_tags(tag,r.get('编号',''))
+    for r in rows:
+        v=by_no.get((r.get('编号') or '')[:3]) or by_name.get(N(r.get('大学','')))
+        if v:
+            r['所在地']=v[0]; r['高度人才加点对象']=v[1]; r['推荐等级']=v[2]
+        else:
+            r.setdefault('所在地',''); r.setdefault('高度人才加点对象',''); r.setdefault('推荐等级','')
+    return rows
+def write_csv(path,rows):  # patched-20261022-P6
+    enrich(path,rows)
+    fields=list(COLS)
+    try:
+        with open(path,encoding='utf-8-sig',newline='') as f: head=next(csv.reader(f),[])
+        head=[OLD_COLS.get(c,c) for c in head if c]
+        if set(COLS)<=set(head): fields=head  # 用户调整过列顺序：沿用表里的顺序（含自己加的列）
+        else: fields=list(COLS)+[c for c in head if c not in COLS]  # 新标准列按默认位置插入，用户自加的列放最后
+    except Exception: pass
+    tmp=path+'.tmp'
+    with open(tmp,'w',encoding='utf-8-sig',newline='') as f:
+        w=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore'); w.writeheader(); w.writerows(rows)
+    os.replace(tmp,path)
+DATE_COLS=[('春夏_出願时间','春夏_試験时间'),('秋冬_出願时间','秋冬_試験时间')]
+ALL_INFO=['春夏_出願时间','春夏_試験时间','秋冬_出願时间','秋冬_試験时间','英語','日本語','筆記内容','口述/面接内容','事前連絡','定員/倍率']
+ITEM_COLS=['英語','日本語','筆記内容','口述/面接内容','事前連絡','定員/倍率']
+WEAK={'','详见要項','有(日程待确认)','见专攻HP','要联系(详见要項)'}
+def missing(row):
+    m=[]
+    for a,b in DATE_COLS:
+        va,vb=row.get(a,''),row.get(b,'')
+        if va=='无冬考': continue
+        if va in WEAK or vb in WEAK: m.append(a.split('_')[0]+'日程')
+    for k in ITEM_COLS:
+        if row.get(k,'') in WEAK: m.append(k)
+    return m
+def _dt(t,k):
+    m=re.search(r'^'+k+r':[ \t]*"?(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?',t,re.M)
+    return datetime.datetime.strptime(m.group(1)+' '+(m.group(2) or '00:00'),'%Y-%m-%d %H:%M') if m else None
+STATE=os.path.join('_scripts','.fill_state.json')
+def load_state(root):
+    import json
+    try: return json.load(open(os.path.join(root,STATE),encoding='utf-8'))
+    except Exception: return {}
+def _unres(txt):
+    un=set()
+    for x in re.split(r'[,，、]',(txt or '').strip().strip('"[]')):
+        x=x.strip()
+        if not x or '预算不足' in x or '予算不足' in x: continue  # 预算不足的列下轮仍需补
+        x=re.sub(r'[（(].*$','',x).strip()
+        un.add('春夏日程' if x in ('夏日程','夏_出願','夏_試験','春夏_出願时间','春夏_試験时间') else '秋冬日程' if x in ('冬日程','冬_出願','冬_試験','秋冬_出願时间','秋冬_試験时间') else x)
+    return un
+def fm_state(root,rel,state=None):
+    """返回 (最近一次检查时间, 最近一次补全尝试时间, 已确认暂无法补全的列集合)
+    范本格式的 md 不带 frontmatter：检查时间取「最新更新：」，补全状态取 _scripts/.fill_state.json（由 mark 写入）；旧格式仍读 frontmatter。"""
+    try: t=open(os.path.join(root,rel),encoding='utf-8').read()
+    except Exception: return None,None,set()
+    head=t[:5000]
+    lc=_dt(head,'last_checked'); fc=_dt(head,'csv_fill_checked')
+    u=re.search(r'最新更新[:：]\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?',t)
+    if u:
+        d=datetime.datetime.strptime(u.group(1)+' '+(u.group(2) or '00:00'),'%Y-%m-%d %H:%M')
+        lc=max(lc,d) if lc else d
+    m=re.search(r'^csv_fill_unresolved:[ \t]*(.*)$',head,re.M)
+    un=_unres(m.group(1)) if m else set()
+    st=(state if state is not None else load_state(root)).get(N(rel))
+    if st:
+        try:
+            d=datetime.datetime.fromisoformat(st.get('checked',''))
+            if not fc or d>=fc: fc=d; un=_unres(st.get('unresolved',''))
+        except Exception: pass
+    return lc,fc,un
+
+# ── 根表（3_大学研究科専攻一覧.csv）驱动 ─────────────────────────────
+INUSE=('','再編予定')
+def load_master(csvdir):
+    """返回 (在用行列表, 全部行dict)。在用 = 状态为空或「再編予定」。"""
+    try: rs=read_csv(os.path.join(csvdir,MAJ_CSV))
+    except Exception: return None,{}
+    allr={r['専攻编号'].strip():r for r in rs if r.get('専攻编号')}
+    use=[r for r in rs if r.get('専攻编号') and r.get('状态','').strip() in INUSE and r['専攻编号'].strip() not in excluded_program_ids()]
+    return use,allr
+def md_id(rel):
+    b=N(os.path.basename(rel)); m=re.match(r'(\d{3}[A-Z]+-\d+(?:-\d+)?)',b) or re.match(r'(\d{3}[A-Z]+-\d+(?:-\d+)?)',N(os.path.basename(os.path.dirname(rel))))
+    return m.group(1) if m else ''
+_BAD=re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+def _subdir(parent,prefix,fallback):
+    """在 parent 下找以 prefix 开头的现有目录（沿用已有命名），没有就用 fallback"""
+    try:
+        for d in sorted(os.listdir(parent)):
+            if N(d).startswith(prefix) and os.path.isdir(os.path.join(parent,d)): return N(d)
+    except Exception: pass
+    return _BAD.sub('',fallback)
+def master_name(r):
+    sub=r.get('细分','').strip()
+    return (r['専攻'].strip()+(' '+sub if sub else '')).strip()
+def skeleton(r,parent_links=None):
+    links=parent_links or []
+    L=[f"# {r['大学']} · {r['研究科']} · {master_name(r)}｜修士（2027年度）",'']
+    L+=[f'- [{k}]({v})' for k,v in links] or ['- [研究科入试信息](https://)']
+    L+=['','## ⏰ 临近提醒','- —','','## 📋 关键日程一览','| 项目 | 内容 | 状态 | 来源 | 最后确认 |','|---|---|---|---|---|']
+    L+=[f'| {k} | — | ❓未获取 | — | — |' for k in ('募集要項','出願期間','筆記試験','口述/面接','合格発表','説明会','過去問')]
+    L+=['','## 🎯 入試内容（考什么）','','### 語学 / 英語要件','- —','','### 日本語要件','- —','','### 筆記試験（专门科目）',
+        '| 科目 | 范围 · 题型 | 依据 |','|---|---|---|','| — | — | — |','','### 口述試験 / 面接','- **官方形式**：—','- **実際に聞かれた内容**：—','',
+        '## 📝 详细信息','### 出願資格 / 定員','- —','','### 研究室 / 指導教員','- 事前連絡要否：—','',
+        '## 📊 入试数据','| 年度 | 项目 | 数值 | 来源 |','|---|---|---|---|','| — | — | — | — |','',
+        '## 📚 経験談 · 参考リンク','| 来源 | 类型 | 年度 | 链接 | 备注 |','|---|---|---|---|---|','| — | — | — | — | — |','',
+        '## 🔄 更新日志','- 最新更新：（未抓取）','']
+    return '\n'.join(L)
+def seed(root,csvp,write):
+    use,allr=load_master(os.path.dirname(csvp))
+    if use is None: print('ABORT 根表读不到(iCloud未下载?)'); sys.exit(2)
+    have={}
+    for rel in md_files(root):
+        i=md_id(rel)
+        if i: have.setdefault(i,rel)
+    todo=[r for r in use if r['専攻编号'] not in have]
+    plan=[]
+    for r in todo:
+        no=r['専攻编号']; u=r['大学编号']; g=r['研究科编号']
+        ud=_subdir(root,u,u+r['大学']); gd=_subdir(os.path.join(root,ud),g,g+r['研究科'])
+        fn=_BAD.sub('',no+master_name(r).replace(' ',''))+'.md'
+        rel=N(os.path.join(ud,gd,fn))
+        # 拆分出来的新行：从母行 md 继承标题下的链接列表（研究科共用来源）
+        par=re.search(r'由\s*(\d{3}[A-Z]+-\d+)\s*拆出',r.get('备注',''))
+        links=[]
+        if par and par.group(1) in have:
+            try: links=head_meta(open(os.path.join(root,have[par.group(1)]),encoding='utf-8').read())[1]
+            except Exception: links=[]
+        plan.append((rel,r,links,par.group(1) if par else ''))
+    print(f'在用専攻 {len(use)}｜已有 md {len(use)-len(todo)}｜待建骨架 {len(todo)}')
+    by=collections.Counter(p[0].split('/')[0] for p in plan)
+    print('按大学（前15）：'+'、'.join(f'{k}:{v}' for k,v in sorted(by.items())[:15]))
+    for rel,r,links,par in plan[:12]: print('  NEW',rel,('（继承 '+par+' 的链接 %d 条）'%len(links)) if par else '')
+    if len(plan)>12: print(f'  … 其余 {len(plan)-12} 个')
+    if not write: print('DRY-RUN：未写入。确认后加 --write。'); return
+    idxp=os.path.join(root,'index.md'); add=[]
+    for rel,r,links,par in plan:
+        p=os.path.join(root,rel)
+        if os.path.exists(p): print('EXISTS',rel); continue
+        os.makedirs(os.path.dirname(p),exist_ok=True)
+        open(p,'w',encoding='utf-8').write(skeleton(r,links))
+        add.append(f"| {r['専攻编号']} | {r['大学']} | {r['研究科']} | {master_name(r)} | {r.get('tag','')} | normal | {rel} | ❓未抓取 | — |")
+    if add:
+        t=open(idxp,encoding='utf-8').read().rstrip('\n')+'\n'+'\n'.join(add)+'\n'
+        tmp=idxp+'.tmp'; open(tmp,'w',encoding='utf-8').write(t); os.replace(tmp,idxp)
+    rows=read_csv(csvp); pos={key(r):i for i,r in enumerate(rows)}; idx=load_index(root)
+    for rel,_,_,_ in plan:
+        r=row_for(root,rel,idx); k=key(r)
+        if k in pos: rows[pos[k]]=r
+        else: rows.append(r); pos[k]=len(rows)-1
+    write_csv(csvp,rows); print(f'SEEDED {len(add)} 个骨架 md，index.md 与 CSV 已追加')
+def main():
+    ap=argparse.ArgumentParser()
+    ap.add_argument('cmd',choices=['pick','update','rebuild','missing','mark','seed','remove'])
+    ap.add_argument('--unresolved',default='',help='mark 用：穷尽来源仍补不上的列，如 "秋冬日程(未公布),事前連絡(官方未记载)"')
+    ap.add_argument('paths',nargs='*')
+    ap.add_argument('--columns',default='',help='update only: comma-separated output columns; preserve other existing fields')
+    ap.add_argument('--root',default='exam-monitor')
+    ap.add_argument('--csv',default='4_考学信息一览.csv')
+    ap.add_argument('--n',type=int,default=5)
+    ap.add_argument('--skip-hours',type=float,default=72)
+    ap.add_argument('--unresolved-days',type=int,default=30)
+    ap.add_argument('--from-uni',type=int,default=0,help='pick 用：只挑大学编号≤N 的，按大学编号从大到小（N→001）依次处理；旧格式 md 也算待处理')
+    ap.add_argument('--claim',action='store_true',help='登记本轮目标，防止并发的下一轮重复挑选')
+    ap.add_argument('--claim-hours',type=float,default=3)
+    ap.add_argument('--group',default='',choices=['','gakka','uni'],help='pick 用：uni=一轮处理一所大学里全部没跑过的専攻；gakka=一轮一个研究科（均按编号顺序）')
+    ap.add_argument('--max-majors',type=int,default=0,help='--group 时每轮最多处理的専攻数（0=不限），剩余的留到下轮')
+    ap.add_argument('--write',action='store_true',help='seed 用：真正写入（默认只预览）')
+    a=ap.parse_args()
+    root=os.path.abspath(a.root); csvp=os.path.abspath(a.csv)
+    selected=[c.strip() for c in a.columns.split(',') if c.strip()]
+    global AUDIT_OFF; AUDIT_OFF=bool(selected) and not (set(selected)&set(DATE_COLUMNS))  # patched-20261023-AUDIT
+    if selected and (a.cmd!='update' or any(c not in COLS or c=='编号' for c in selected)):
+        ap.error('--columns requires update and valid output columns other than 编号')
+    if a.cmd=='remove':
+        requested=set(a.paths)
+        if not requested or not requested<=excluded_program_ids():
+            ap.error('remove只允许删除program_scope.json中明确排除的编号')
+        rows=read_csv(csvp);present={r.get('编号') for r in rows}
+        if not requested<=present:ap.error('remove编号未全部出现在CSV中')
+        write_csv(csvp,[r for r in rows if r.get('编号') not in requested])
+        print('REMOVED',','.join(sorted(requested)))
+        return
+    if a.cmd=='seed': return seed(root,csvp,a.write)
+    if a.cmd=='mark':
+        import json
+        st=load_state(root); now=datetime.datetime.now().isoformat(timespec='minutes')
+        for rel in a.paths:
+            rel=N(rel)
+            if not os.path.exists(os.path.join(root,rel)): print('NOTFOUND',rel); continue
+            st[rel]={'checked':now,'unresolved':a.unresolved.strip()}; print('MARKED',rel,'|',a.unresolved.strip() or '无未解决列')
+        f=os.path.join(root,STATE); os.makedirs(os.path.dirname(f),exist_ok=True)
+        tmp=f+'.tmp'; json.dump(st,open(tmp,'w',encoding='utf-8'),ensure_ascii=False,indent=0); os.replace(tmp,f)
+        return
+    idx=load_index(root)
+    files=md_files(root)
+    state=load_state(root)
+    # 参照表读不到（多为 iCloud 未下载）时：rebuild 直接中止；update 保留原行的参照列并提示
+    unread=[f for f in (os.path.join(os.path.dirname(csvp),UNI_CSV),os.path.join(os.path.dirname(csvp),MAJ_CSV),os.path.join(root,'index.md')) if not _readable(f)]
+    if a.cmd=='rebuild':
+        if unread:
+            print('ABORT 参照表读不到(iCloud未下载?)，未重建：'+'、'.join(os.path.basename(f) for f in unread)); sys.exit(2)
+        rows=[];bad=[]
+        for rel in files:
+            if not read_ok(root,rel): bad.append(rel); continue
+            rows.append(row_for(root,rel,idx))
+        write_csv(csvp,rows); print(f'rebuilt {len(rows)} rows')
+        for b in bad: print('UNREADABLE',b)
+        return
+    rows=read_csv(csvp)
+    pos={key(r):i for i,r in enumerate(rows)}
+    if a.cmd=='update':
+        for rel in a.paths:
+            rel=N(rel)
+            if md_id(rel) in excluded_program_ids():
+                print('EXCLUDED 非修士范围',rel);continue
+            if not read_ok(root,rel): print('UNREADABLE',rel); continue
+            r=row_for(root,rel,idx); k=key(r)
+            if k in pos:
+                old=rows[pos[k]]
+                for c in KEEP:
+                    if not r.get(c) and old.get(c): r[c]=old[c]  # 参照表读不到时不把原值冲成空白
+                if selected:
+                    r=collections.OrderedDict((c,r.get(c,'') if c in selected else old.get(c,'')) for c in COLS)
+                for c,v in old.items(): r.setdefault(c,v)  # 用户自加的列原样保留  # patched-20261022-P7
+                rows[pos[k]]=r; print('UPDATED',rel)
+            else:
+                if selected: raise ValueError('Column-only update cannot append a new row: '+rel)
+                rows.append(r); pos[k]=len(rows)-1; print('APPENDED',rel)
+        write_csv(csvp,rows)
+        if unread: print('WARN 参照表读不到(iCloud未下载?)：'+'、'.join(os.path.basename(f) for f in unread)+'。已保留原有的 推荐等级/所在地/高度人才加点对象/领域；请先下载这些文件再重跑 update。')
+        return
+    # map csv rows -> md files via frontmatter-derived key
+    now=datetime.datetime.now()
+    cand=[]; rowmap={}
+    for rel in files:
+        if not read_ok(root,rel):
+            cand.append((rel,['(iCloud未下载,需先本地化)'],None)); continue
+        k=key(row_for(root,rel,idx))
+        if k not in pos: cand.append((rel,['CSV中无此行'],None)); continue
+        lc,fc,un=fm_state(root,rel,state)
+        m=missing(rows[pos[k]])
+        if fc and (now-fc).days<a.unresolved_days: m=[x for x in m if x not in un]
+        last=max([d for d in (lc,fc) if d],default=None)
+        cand.append((rel,m,last)); rowmap[rel]=rows[pos[k]]
+    if a.cmd=='missing':
+        for rel,m,lc in cand:
+            if not a.paths or rel in [N(x) for x in a.paths]: print(rel,'|',','.join(m) or '无缺项','|',lc)
+        return
+    # 优先级：只看 4_考学信息一览.csv 中该行缺几项（缺得越多越先抓）；同数按 md 路径(=index)顺序
+    import json
+    claimf=os.path.join(root,'_scripts','.claims.json')
+    try: claims=json.load(open(claimf,encoding='utf-8'))
+    except Exception: claims={}
+    claims={k:v for k,v in claims.items() if (now-datetime.datetime.fromisoformat(v)).total_seconds()<a.claim_hours*3600}
+    tiered=[]
+    def _skel(rel):
+        try: return '最新更新：（未抓取）' in open(os.path.join(root,rel),encoding='utf-8').read()
+        except Exception: return False
+    def _old(rel):
+        try: return bool(re.match(r'\s*(<!--.*?-->\s*)?---\n',open(os.path.join(root,rel),encoding='utf-8').read(3000),re.S))
+        except Exception: return False
+    if a.group in ('gakka','uni'):
+        use,allr=load_master(os.path.dirname(csvp))
+        inuse={r['専攻编号'] for r in (use or [])}
+        seq=[]
+        for i,(rel,m,lc) in enumerate(cand):
+            no=md_id(rel)
+            if use is not None and no not in inuse: continue   # 根表里已拆分/已删除/不存在的不处理
+            if rel in claims: continue
+            old=_old(rel); sk=_skel(rel)
+            if a.group=='uni':
+                if not (old or sk or any('iCloud' in x for x in m)): continue          # 只挑没跑过的：骨架 md 或旧格式 md
+            else:
+                if lc and (now-lc).total_seconds()<a.skip_hours*3600: continue
+                if not m and not old: continue
+            g=re.match(r'(\d{3})' if a.group=='uni' else r'(\d{3}[A-Z]+)',no)
+            seq.append(((g.group(1) if g else rel[:4]),no,rel,(['旧格式待改写'] if old else [])+m))
+        seq.sort(key=lambda x:(x[0],x[1]))
+        if not seq: print('ALLDONE 根表在用専攻已全部处理完'); return
+        g0=seq[0][0]; grp_all=[x for x in seq if x[0]==g0]; out=grp_all[:a.max_majors] if a.max_majors>0 else grp_all
+        col='大学编号' if a.group=='uni' else '研究科编号'; nm='大学' if a.group=='uni' else '研究科'
+        tot=sum(1 for r in (use or []) if r[col]==g0)
+        fac=next((r[nm] for r in (use or []) if r[col]==g0),'')
+        print(f'{a.group.upper()}\t{g0}{fac}\t本轮{len(out)}个／待处理{len(grp_all)}个／在用専攻{tot}个')
+        for _,no,rel,m in out:
+            n=len([x for x in m if x!='旧格式待改写'])
+            kind='骨架' if _skel(rel) else '旧格式' if '旧格式待改写' in m else '范本格式'
+            print(rel+'\t'+kind+f'\t缺{n}项\t'+','.join(m))
+        if a.claim:
+            for _,_,rel,_ in out: claims[rel]=now.isoformat(timespec='seconds')
+            tmp=claimf+'.tmp'; json.dump(claims,open(tmp,'w',encoding='utf-8'),ensure_ascii=False,indent=0); os.replace(tmp,claimf)
+        return
+    if a.from_uni:
+        # 按大学编号从大到小逐校推进：旧格式（带 frontmatter）的 md 一律待处理；已是范本格式的只在仍有缺项时处理
+        seq=[]
+        for i,(rel,m,lc) in enumerate(cand):
+            u=re.match(r'(\d{3})',N(rel))
+            if not u or int(u.group(1))>a.from_uni: continue
+            if rel in claims: continue
+            if lc and (now-lc).total_seconds()<a.skip_hours*3600: continue
+            old=_old(rel)
+            if not m and not old: continue
+            seq.append((-int(u.group(1)),i,rel,(['旧格式待改写'] if old else [])+m))
+        seq.sort()
+        out=seq[:a.n]
+        for _,_,rel,m in out: print(rel+'\t'+('旧格式' if '旧格式待改写' in m else '范本格式')+f'\t缺{len([x for x in m if x!="旧格式待改写"])}项\t'+','.join(m))
+        if not out: print('ALLDONE 编号≤%03d 的大学已全部处理完'%a.from_uni)
+        if a.claim and out:
+            for _,_,rel,_ in out: claims[rel]=now.isoformat(timespec='seconds')
+            tmp=claimf+'.tmp'; json.dump(claims,open(tmp,'w',encoding='utf-8'),ensure_ascii=False,indent=0); os.replace(tmp,claimf)
+        return
+    for i,(rel,m,lc) in enumerate(cand):
+        if not m: continue
+        if rel in claims: continue  # 其他轮次正在处理
+        if lc and (now-lc).total_seconds()<a.skip_hours*3600: continue
+        k=None
+        if rel in rowmap:
+            filled=sum(1 for c in ALL_INFO if rowmap[rel].get(c,'') not in WEAK)
+            tier=0 if filled==0 else 1 if filled<=3 else 2
+        else: tier=0
+        tiered.append((-len(m),tier,i,rel,m))
+    tiered.sort()  # 缺项越多越优先（完全没抓到的缺 9 项排最前），同数按 md 路径顺序
+    out=tiered[:a.n]
+    for _,t,_,rel,m in out: print(rel+'\t'+['完全没抓到','大部分没抓到','部分缺项'][t]+f'\t缺{len(m)}项\t'+','.join(m))
+    if a.claim and out:
+        for _,_,_,rel,_ in out: claims[rel]=now.isoformat(timespec='seconds')
+        tmp=claimf+'.tmp'; json.dump(claims,open(tmp,'w',encoding='utf-8'),ensure_ascii=False,indent=0); os.replace(tmp,claimf)
+if __name__=='__main__': main()

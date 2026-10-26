@@ -789,6 +789,9 @@ def main():
     ap.add_argument('--claim',action='store_true',help='登记本轮目标，防止并发的下一轮重复挑选')
     ap.add_argument('--claim-hours',type=float,default=3)
     ap.add_argument('--group',default='',choices=['','gakka','uni'],help='pick 用：uni=一轮处理一所大学里全部没跑过的専攻；gakka=一轮一个研究科（均按编号顺序）')
+    ap.add_argument('--min-uni',type=int,default=0,help='pick --group 用：只挑大学编号≥N 的（从该校开始按编号顺序推进）')  # patched-20261026
+    ap.add_argument('--order',default='uni',choices=['uni','date'],help='pick --group 用：uni=按大学编号；date=按表4「更新日期」从远到近（空日期最先），同日期按编号')  # patched-20261026
+    ap.add_argument('--fill',action='store_true',help='pick --group 用：一所大学不够 --max-majors 时，按编号顺序接着取下一所，凑满为止')  # patched-20261026
     ap.add_argument('--max-majors',type=int,default=0,help='--group 时每轮最多处理的専攻数（0=不限），剩余的留到下轮')
     ap.add_argument('--write',action='store_true',help='seed 用：真正写入（默认只预览）')
     a=ap.parse_args()
@@ -857,17 +860,24 @@ def main():
         return
     # map csv rows -> md files via frontmatter-derived key
     now=datetime.datetime.now()
-    cand=[]; rowmap={}
+    cand=[]; rowmap={}; stale_audit=[]
     for rel in files:
         if not read_ok(root,rel):
             cand.append((rel,['(iCloud未下载,需先本地化)'],None)); continue
-        k=key(row_for(root,rel,idx))
+        try: k=key(row_for(root,rel,idx))
+        except ValueError as e:  # patched-20261026-STALE: 日期核对数据过期只影响日期列，不中断 pick/missing
+            if '日期核对数据' not in str(e): raise
+            _sv=AUDIT_OFF; AUDIT_OFF=True  # main() 开头已声明 global AUDIT_OFF
+            try: k=key(row_for(root,rel,idx))
+            finally: AUDIT_OFF=_sv
+            stale_audit.append(rel)
         if k not in pos: cand.append((rel,['CSV中无此行'],None)); continue
         lc,fc,un=fm_state(root,rel,state)
         m=missing(rows[pos[k]])
         if fc and (now-fc).days<a.unresolved_days: m=[x for x in m if x not in un]
         last=max([d for d in (lc,fc) if d],default=None)
         cand.append((rel,m,last)); rowmap[rel]=rows[pos[k]]
+    if stale_audit: print(f'WARN 日期核对数据过期 {len(stale_audit)} 份（.reviewed_dates.json 哈希与 md 不符，已按自动解析挑选；update 这些 md 前须先复核四列）')
     if a.cmd=='missing':
         for rel,m,lc in cand:
             if not a.paths or rel in [N(x) for x in a.paths]: print(rel,'|',','.join(m) or '无缺项','|',lc)
@@ -900,18 +910,25 @@ def main():
                 if lc and (now-lc).total_seconds()<a.skip_hours*3600: continue
                 if not m and not old: continue
             g=re.match(r'(\d{3})' if a.group=='uni' else r'(\d{3}[A-Z]+)',no)
+            if a.min_uni and g and int(g.group(1)[:3])<a.min_uni: continue  # patched-20261026
             seq.append(((g.group(1) if g else rel[:4]),no,rel,(['旧格式待改写'] if old else [])+m))
-        seq.sort(key=lambda x:(x[0],x[1]))
+        if a.order=='date': seq.sort(key=lambda x:(rowmap.get(x[2],{}).get('更新日期','') or '',x[0],x[1]))  # patched-20261026: 更新日期远→近
+        else: seq.sort(key=lambda x:(x[0],x[1]))
         if not seq: print('ALLDONE 根表在用専攻已全部处理完'); return
         g0=seq[0][0]; grp_all=[x for x in seq if x[0]==g0]; out=grp_all[:a.max_majors] if a.max_majors>0 else grp_all
         col='大学编号' if a.group=='uni' else '研究科编号'; nm='大学' if a.group=='uni' else '研究科'
         tot=sum(1 for r in (use or []) if r[col]==g0)
         fac=next((r[nm] for r in (use or []) if r[col]==g0),'')
-        print(f'{a.group.upper()}\t{g0}{fac}\t本轮{len(out)}个／待处理{len(grp_all)}个／在用専攻{tot}个')
+        if a.fill and a.max_majors>0:  # patched-20261026: 跨校凑满 --max-majors
+            out=seq[:a.max_majors]
+            gs=[]; [gs.append(x[0]) for x in out if x[0] not in gs]
+            names='、'.join(g+next((r[nm] for r in (use or []) if r[col]==g),'') for g in gs)
+            print(f'{a.group.upper()}\t{names}\t本轮{len(out)}个／待处理(编号≥{a.min_uni:03d}){len(seq)}个'+('／按更新日期远→近' if a.order=='date' else ''))
+        else: print(f'{a.group.upper()}\t{g0}{fac}\t本轮{len(out)}个／待处理{len(grp_all)}个／在用専攻{tot}个')
         for _,no,rel,m in out:
             n=len([x for x in m if x!='旧格式待改写'])
             kind='骨架' if _skel(rel) else '旧格式' if '旧格式待改写' in m else '范本格式'
-            print(rel+'\t'+kind+f'\t缺{n}项\t'+','.join(m))
+            print(rel+'\t'+kind+f'\t缺{n}项\t'+','.join(m)+(f"\t更新日期={rowmap.get(rel,{}).get('更新日期','') or '（空）'}" if a.order=='date' else ''))
         if a.claim:
             for _,_,rel,_ in out: claims[rel]=now.isoformat(timespec='seconds')
             tmp=claimf+'.tmp'; json.dump(claims,open(tmp,'w',encoding='utf-8'),ensure_ascii=False,indent=0); os.replace(tmp,claimf)

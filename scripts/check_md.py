@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """只读对照：仓库 exam-monitor/ 的 md 和飞书云盘文件夹，按路径列出哪边有、哪边没有。
-不下载、不比较内容、不写入任何东西。顺带检查表格「编号」链接是否指向云盘里现存的 md。"""
+不下载、不比较内容、不写入任何东西。顺带检查表格「専攻名」链接是否指向云盘里现存的 md。"""
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 from sync_feishu import call, get_token, list_records, log  # noqa: E402
-from sync_md import ID_RE, KEY, key_text, link_of, nfc  # noqa: E402
+from sync_md import ID_RE, KEY, LINK, key_text, link_of, nfc  # noqa: E402
 
 
 def list_folder(tok, folder):
@@ -66,36 +66,36 @@ def main():
         for x in dups:
             log(f"  ! {x}")
 
-    # 「编号」链接检查
+    # 「専攻名」链接检查（按编号列出）
     key2rel = {}
     for rel in local:
         m = ID_RE.match(rel.rpartition("/")[2])
         if m:
             key2rel[m.group(1)] = rel
     no_link, broken = [], []
-    for rec in list_records(tok, env["FEISHU_APP_TOKEN"], env["FEISHU_TABLE_ID"], [KEY]):
-        v = rec.get("fields", {}).get(KEY)
-        key = key_text(v)
+    for rec in list_records(tok, env["FEISHU_APP_TOKEN"], env["FEISHU_TABLE_ID"], [KEY, LINK]):
+        fields = rec.get("fields", {})
+        key = key_text(fields.get(KEY))
         if not key:
             continue
-        t = link_of(v)
+        t = link_of(fields.get(LINK))
         if not t:
             no_link.append(key)
         elif t not in tokens:
             broken.append(key)
-    log(f"「编号」无 md 链接 {len(no_link)}：{', '.join(no_link[:100])}")
-    log(f"「编号」链接指向的文件不在云盘文件夹里 {len(broken)}：{', '.join(broken[:100])}")
+    log(f"「{LINK}」无 md 链接 {len(no_link)}：{', '.join(no_link[:100])}")
+    log(f"「{LINK}」链接指向的文件不在云盘文件夹里 {len(broken)}：{', '.join(broken[:100])}")
 
     summary = env.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write("### md 对照（只看有无，不比内容）\n\n"
-                    "| 仓库 | 云盘 | 只在仓库 | 只在云盘 | 云盘重复 | 编号无链接 | 编号链接失效 |\n"
+                    f"| 仓库 | 云盘 | 只在仓库 | 只在云盘 | 云盘重复 | {LINK}无链接 | {LINK}链接失效 |\n"
                     "|---|---|---|---|---|---|---|\n"
                     f"| {len(local)} | {len(remote)} | {len(only_repo)} | {len(only_drive)} | {len(dups)} "
                     f"| {len(no_link)} | {len(broken)} |\n\n")
             for title, items in (("只在仓库（云盘缺）", only_repo), ("只在云盘（仓库无）", only_drive),
-                                 ("云盘同名重复", dups), ("编号无链接", no_link), ("编号链接失效", broken)):
+                                 ("云盘同名重复", dups), (f"{LINK}无链接", no_link), (f"{LINK}链接失效", broken)):
                 if items:
                     f.write(f"<details><summary>{title}（{len(items)}）</summary>\n\n" +
                             "".join(f"- `{x}`\n" for x in items) + "\n</details>\n\n")

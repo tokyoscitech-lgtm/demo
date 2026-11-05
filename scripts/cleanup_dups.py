@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""清理云盘里同名重复的 md：每组保留「编号」链接指向的那一份，其余移到飞书回收站（可恢复）。
-没有任何一份被「编号」链接的组：不动，只列出。DRY_RUN=true 时只列出计划。"""
+"""清理云盘里同名重复的 md：每组保留「専攻名」链接指向的那一份，其余移到飞书回收站（可恢复）。
+没有任何一份被「専攻名」链接的组：不动，只列出。DRY_RUN=true 时只列出计划。"""
 import os
 import sys
 
@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from check_md import list_folder  # noqa: E402
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 from sync_feishu import call, get_token, list_records, log  # noqa: E402
-from sync_md import KEY, link_of, nfc  # noqa: E402
+from sync_md import LINK, link_of, nfc  # noqa: E402
 
 
 def walk_groups(tok, root):
@@ -33,8 +33,8 @@ def main():
     dry = env.get("DRY_RUN", "").lower() == "true"
     tok = get_token(env["FEISHU_APP_ID"], env["FEISHU_APP_SECRET"])
     dups = walk_groups(tok, env["FEISHU_FOLDER_TOKEN"])
-    linked = {link_of(r.get("fields", {}).get(KEY))
-              for r in list_records(tok, env["FEISHU_APP_TOKEN"], env["FEISHU_TABLE_ID"], [KEY])}
+    linked = {link_of(r.get("fields", {}).get(LINK))
+              for r in list_records(tok, env["FEISHU_APP_TOKEN"], env["FEISHU_TABLE_ID"], [LINK])}
     linked.discard(None)
     log(f"同名重复：{len(dups)} 组")
 
@@ -43,7 +43,7 @@ def main():
         keep = [t for t in toks if t in linked]
         if len(keep) != 1:
             skipped.append(f"{rel}（{len(toks)} 份，被链接 {len(keep)} 份）")
-            log(f"  ? 跳过 {rel}：{len(toks)} 份中被「编号」链接的有 {len(keep)} 份")
+            log(f"  ? 跳过 {rel}：{len(toks)} 份中被「{LINK}」链接的有 {len(keep)} 份")
             continue
         for t in toks:
             if t == keep[0]:

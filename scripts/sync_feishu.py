@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """把 4_考学信息一览.csv 同步到飞书多维表格。
 
-- 唯一键：编号。有就更新（只更新有变化的记录），没有就新增。
+- 唯一键：编号（纯文本，只用来匹配，从不改）。有就更新（只更新有变化的记录），没有就新增。
+- md 链接在超链接字段「専攻名」（LINK_FIELD）：链接本身由 sync_md 维护；这里只在新增时补链接，
+  并在「専攻」变化时同步「専攻名」的显示文字（保留原链接）。
 - 本次 commit 从 CSV 里删掉的编号（DELETED_KEYS_LIST 列出）：飞书里对应的行删除。
 - 其余 CSV 里没有、飞书里有的记录：不删除，只在日志里列出。
 - 飞书里编号为空的记录：跳过。
@@ -28,6 +30,8 @@ from datetime import datetime, timedelta, timezone
 API = "https://open.feishu.cn/open-apis"
 JST = timezone(timedelta(hours=9))
 KEY = "编号"
+LINK = os.environ.get("LINK_FIELD", "専攻名")   # md 链接所在的超链接字段
+LINK_TEXT_SRC = "専攻"                          # 「専攻名」显示文字取自这个字段
 
 # CSV 列名 -> 飞书字段名。CSV 列名写成元组时，按顺序取第一个存在的列（兼容改名前后）。
 MAPPING = [
@@ -183,7 +187,7 @@ def key_text(value):
 
 
 def md_link(key):
-    """新增记录时，给 编号 找到对应 md 的云盘链接（超链接字段必须带 link）"""
+    """新增记录时，给「専攻名」找到对应 md 的云盘链接（超链接字段必须带 link）"""
     domain = (os.environ.get("FEISHU_DOMAIN") or "").rstrip("/")
     root = os.environ.get("FEISHU_FOLDER_TOKEN")
     md_root = os.environ.get("MD_ROOT", "exam-monitor")
@@ -200,6 +204,11 @@ def md_link(key):
         if toks:
             return f"{domain}/file/{toks[0]}"
     return f"{domain}/drive/folder/{root}"
+
+
+def link_text(want, key):
+    v = want.get(LINK_TEXT_SRC)
+    return (v if isinstance(v, str) and v.strip() else key).strip()
 
 
 def comparable(v, ftype):
@@ -265,7 +274,10 @@ def main():
 
     # 飞书现有记录
     names = [fn for _, fn in cols]
-    recs = list_records(tok, app, tbl, names)
+    has_link = ftypes.get(LINK) == T_URL and LINK not in names
+    if not has_link:
+        log(f"⚠ 飞书里没有超链接字段「{LINK}」，不维护 md 链接文字")
+    recs = list_records(tok, app, tbl, names + ([LINK] if has_link else []))
     log(f"飞书：{len(recs)} 条记录")
     existing, dup_fs, blank = {}, [], 0
     for rec in recs:
@@ -278,24 +290,29 @@ def main():
             dup_fs.append(key)
             continue
         existing[key] = (rec["record_id"],
-                         {fn: norm_existing(fields.get(fn), ftypes[fn]) for fn in names})
+                         {fn: norm_existing(fields.get(fn), ftypes[fn]) for fn in names},
+                         fields.get(LINK) if has_link else None)
 
     to_create, to_update, changes = [], [], []
     for key, want in desired.items():
         if key not in existing:
             fields = {k: v for k, v in want.items() if v is not None}
-            if ftypes[KEY] == T_URL:
+            if has_link:
                 md_link.tok = tok
-                fields[KEY] = {"text": key, "link": md_link(key) if not dry else "(dry-run)"}
+                fields[LINK] = {"text": link_text(want, key), "link": md_link(key) if not dry else "(dry-run)"}
             to_create.append({"fields": fields})
             continue
-        rid, have = existing[key]
+        rid, have, cur_link = existing[key]
         diff = {}
         for fn, v in want.items():
             if fn == KEY:  # 编号 是匹配键，链接由 md 同步维护，这里从不改
                 continue
             if comparable(v, ftypes[fn]) != have.get(fn):
                 diff[fn] = v
+        if has_link and isinstance(cur_link, dict) and cur_link.get("link"):
+            text = link_text(want, key)
+            if (cur_link.get("text") or "").strip() != text:  # 只改显示文字，链接原样保留
+                diff[LINK] = {"text": text, "link": cur_link["link"]}
         if diff:
             to_update.append({"record_id": rid, "fields": diff})
             changes.append((key, list(diff)))

@@ -1,6 +1,7 @@
 name: Cleanup duplicate md in Feishu
 
 # 同名重复的 md：保留「専攻」链接的那份，其余移到飞书回收站（可恢复）
+# 只在云盘、仓库里没有的 md：移到飞书回收站（仍被「専攻」链接的不删）
 on:
   workflow_dispatch:
     inputs:

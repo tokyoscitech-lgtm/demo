@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """只把「本次 commit 改动过的」exam-monitor/ 下的 md 同步到飞书云盘，并维护多维表格「専攻名」里的文件链接。
-（「编号」是纯文本匹配键，从不写入；md 链接放在超链接字段「専攻名」，显示文字沿用现有文字，没有则用「専攻」。）
+（「编号」是纯文本匹配键，从不写入；md 链接放在超链接字段「専攻名」，显示文字沿用现有文字，没有则用 CSV 的「専攻」列。）
 
 改动文件列表由 workflow 用 git diff 生成（MD_CHANGED_LIST 指向的文本文件，一行一个路径）。
 对列表里的每个 md：
@@ -40,7 +40,16 @@ from sync_feishu import API, call, get_token, list_records, log  # noqa: E402
 
 KEY = "编号"                                       # 匹配键（纯文本，只读）
 LINK = os.environ.get("LINK_FIELD", "専攻名")       # md 链接所在的超链接字段
-LINK_TEXT_FALLBACK = "専攻"                         # 链接字段没有文字时，用这个字段的值作显示文字
+CSV_PATH = os.environ.get("CSV_PATH", "4_考学信息一览.csv")  # 链接字段没有文字时，取 CSV 的「専攻」作显示文字
+
+
+def csv_texts():
+    import csv
+    try:
+        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
+            return {(r.get("编号") or "").strip(): (r.get("専攻") or "").strip() for r in csv.DictReader(f)}
+    except OSError:
+        return {}
 ID_RE = re.compile(r"^(\d{3}[A-Z]-\d{2})")
 
 
@@ -168,11 +177,12 @@ def set_link(tok, app, tbl, record_id, text, file_token, domain):
 def load_records(tok, app, tbl):
     """编号 -> (record_id, 当前链接的 file token, 链接显示文字)"""
     out = {}
-    for rec in list_records(tok, app, tbl, [KEY, LINK, LINK_TEXT_FALLBACK]):
+    fallback = csv_texts()
+    for rec in list_records(tok, app, tbl, [KEY, LINK]):
         f = rec.get("fields", {})
         key = key_text(f.get(KEY))
         if key:
-            text = key_text(f.get(LINK)) or key_text(f.get(LINK_TEXT_FALLBACK)) or key
+            text = key_text(f.get(LINK)) or fallback.get(key) or key
             out.setdefault(key, (rec["record_id"], link_of(f.get(LINK)), text))
     return out
 

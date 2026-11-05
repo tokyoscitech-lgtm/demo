@@ -3,7 +3,7 @@
 
 - 唯一键：编号（纯文本，只用来匹配，从不改）。有就更新（只更新有变化的记录），没有就新增。
 - md 链接在超链接字段「専攻名」（LINK_FIELD）：链接本身由 sync_md 维护；这里只在新增时补链接，
-  并在「専攻」变化时同步「専攻名」的显示文字（保留原链接）。
+  并让「専攻名」的显示文字跟 CSV 的「専攻」列一致（保留原链接）。飞书里没有「専攻」字段，不同步这一列。
 - 本次 commit 从 CSV 里删掉的编号（DELETED_KEYS_LIST 列出）：飞书里对应的行删除。
 - 其余 CSV 里没有、飞书里有的记录：不删除，只在日志里列出。
 - 飞书里编号为空的记录：跳过。
@@ -31,7 +31,7 @@ API = "https://open.feishu.cn/open-apis"
 JST = timezone(timedelta(hours=9))
 KEY = "编号"
 LINK = os.environ.get("LINK_FIELD", "専攻名")   # md 链接所在的超链接字段
-LINK_TEXT_SRC = "専攻"                          # 「専攻名」显示文字取自这个字段
+LINK_TEXT_SRC = ("専攻",)                       # 「専攻名」显示文字取自 CSV 的这一列（不同步到飞书）
 
 # CSV 列名 -> 飞书字段名。CSV 列名写成元组时，按顺序取第一个存在的列（兼容改名前后）。
 MAPPING = [
@@ -41,7 +41,6 @@ MAPPING = [
     (("所在地",), "所在地"),
     (("高才加分", "高度人才加点对象"), "高才加分"),
     (("研究科",), "研究科"),
-    (("専攻",), "専攻"),
     (("包含学科", "领域"), "包含学科"),
     (("春夏_出願时间",), "春夏_出願时间"),
     (("春夏_試験时间",), "春夏_試験时间"),
@@ -206,9 +205,8 @@ def md_link(key):
     return f"{domain}/drive/folder/{root}"
 
 
-def link_text(want, key):
-    v = want.get(LINK_TEXT_SRC)
-    return (v if isinstance(v, str) and v.strip() else key).strip()
+def link_text(texts, key):
+    return (texts.get(key) or "").strip() or key
 
 
 def comparable(v, ftype):
@@ -261,7 +259,8 @@ def main():
 
     # CSV -> 期望值
     key_col = next(c for c, fn in cols if fn == KEY)
-    desired, dup_csv = {}, []
+    desired, dup_csv, texts = {}, [], {}
+    text_col = next((c for c in LINK_TEXT_SRC if c in header), None)
     for r in rows:
         key = (r.get(key_col) or "").strip()
         if not key:
@@ -269,6 +268,8 @@ def main():
         if key in desired:
             dup_csv.append(key)
         desired[key] = {fn: to_feishu(r.get(col), ftypes[fn], fn) for col, fn in cols}
+        if text_col:
+            texts[key] = r.get(text_col) or ""
     if dup_csv:
         log(f"⚠ CSV 中编号重复（以最后一行为准）：{dup_csv}")
 
@@ -299,7 +300,7 @@ def main():
             fields = {k: v for k, v in want.items() if v is not None}
             if has_link:
                 md_link.tok = tok
-                fields[LINK] = {"text": link_text(want, key), "link": md_link(key) if not dry else "(dry-run)"}
+                fields[LINK] = {"text": link_text(texts, key), "link": md_link(key) if not dry else "(dry-run)"}
             to_create.append({"fields": fields})
             continue
         rid, have, cur_link = existing[key]
@@ -310,7 +311,7 @@ def main():
             if comparable(v, ftypes[fn]) != have.get(fn):
                 diff[fn] = v
         if has_link and isinstance(cur_link, dict) and cur_link.get("link"):
-            text = link_text(want, key)
+            text = link_text(texts, key)
             if (cur_link.get("text") or "").strip() != text:  # 只改显示文字，链接原样保留
                 diff[LINK] = {"text": text, "link": cur_link["link"]}
         if diff:

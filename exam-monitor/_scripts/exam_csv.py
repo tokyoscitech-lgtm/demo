@@ -431,7 +431,12 @@ def build_row(p, idx):
     r['英語要件']=cap(' '.join(bullets(eng_full)),300)
     jp=section(t,r'日本語要件'); r['日本語要件']=cap(' '.join(bullets(jp)),200)
     wr=section(t,r'筆記')
-    subj=[c[0]+('：'+c[1] if len(c)>1 and c[1] not in('—','') else '') for c in table(wr)[1:] if c and c[0] not in('—','')]
+    _wt=table(wr); _tc=2 if _wt and len(_wt[0])>2 and re.search(r'时间|時間',_wt[0][2]) else None  # 新表头「科目｜范围·题型｜时间」（用户2026-11-05）
+    def _sj(c):
+        n=c[0];tm=c[_tc] if _tc is not None and len(c)>_tc and c[_tc] not in('—','') else ''
+        if tm: n=(n[:-1]+'，'+tm+'）') if n.endswith('）') else n+'（'+tm+'）'
+        return n+('：'+c[1] if len(c)>1 and c[1] not in('—','') else '')
+    subj=[_sj(c) for c in _wt[1:] if c and c[0] not in('—','')]
     r['筆記科目']=cap(' ／ '.join(subj) or ' '.join(bullets(wr)),350)
     oral=section(t,r'口述')
     of=next((b for b in bullets(oral) if '官方形式' in b or '公式' in b or '形式' in b),'') or (bullets(oral)[0] if bullets(oral) else '')
@@ -488,6 +493,8 @@ def build_row(p, idx):
     r['入試情報URL']=nyushi;r['募集要項URL']=yoko
     # 募集要項列：优先要項PDF/页面URL；无URL时退回📋表中「募集要項」行的文字
     r['募集要項']=yoko or cap(re.sub(r'^\[[^\]]*\]\s*','',sd['募集要項'][0]) if sd['募集要項'] else '',200)
+    rq=reviewed_col(t,p,'.reviewed_quota.json','定員/倍率')
+    if rq is not None:r['定員/倍率']=rq
     r['last_checked']=g('last_checked');r['md文件']=N(p)
     return r
 
@@ -597,10 +604,10 @@ def uni_lookup(csvdir):
     return by_no,by_name
 MAJ_CSV='3_大学研究科専攻一覧.csv'
 def major_lookup(csvdir):
-    """3_大学研究科専攻一覧.csv：専攻编号 -> (研究科, 専攻, tag)"""
+    """3_大学研究科専攻一覧.csv：専攻编号 -> (研究科, 専攻, 包含学科；兼容旧tag)"""
     try: rs=read_csv(os.path.join(csvdir,MAJ_CSV))
     except Exception: return {}
-    return {r['専攻编号'].strip():(N(r.get('研究科','').strip()),N(r.get('専攻','').strip()),r.get('tag','').strip()) for r in rs if r.get('専攻编号')}
+    return {r['専攻编号'].strip():(N(r.get('研究科','').strip()),N(r.get('専攻','').strip()),r.get('包含学科',r.get('tag','')).strip()) for r in rs if r.get('専攻编号')}
 _SUF=r'[（(](?:修士課程|修士|博士前期課程|博士前期|博士課程前期|博士後期課程|博士後期|博士課程)[）)]'
 def unify_major(n4,n3,sub=False):
     """以3表専攻名为准，保留コース/領域等细分：去掉「（修士課程）」类后缀"""
@@ -632,8 +639,72 @@ def enrich(path,rows):
         else:
             r.setdefault('所在地',''); r.setdefault('高度人才加点对象',''); r.setdefault('推荐等级','')
     return rows
-def write_csv(path,rows):  # patched-20261022-P6
-    enrich(path,rows)
+# ---- 表格精简：去掉「未公布/没有写」之类的说明（用户2026-11-05）----
+_NEG=re.compile(r'(未|没有|没|尚未|并未)(单独|具体|明确)?(公布|公开|公開|写明?|写出|記載|记载|载明|给出|说明|提及|列出|指定|規定|规定)|不明|未定|不详')
+_OPEN='（(〔[【';_CLOSE='）)〕]】'
+def _split_top(s,seps):
+    parts=[];buf='';d=0
+    for ch in s:
+        if ch in _OPEN:d+=1
+        elif ch in _CLOSE:d=max(0,d-1)
+        if d==0 and ch in seps:
+            parts.append((buf,ch));buf=''
+        else:buf+=ch
+    parts.append((buf,''));return parts
+_RANK={'':0,',':1,'，':1,';':2,'；':2,'。':3}
+def _clean_list(s,seps):
+    keep=[]
+    for t,sep in _split_top(s,seps):
+        if _NEG.search(t):
+            if keep and _RANK.get(sep,0)>_RANK.get(keep[-1][1],0):keep[-1]=(keep[-1][0],sep)
+            continue
+        keep.append((t,sep))
+    return ''.join(t+sep for t,sep in keep)
+def _paren(s):
+    # 从最内层括号开始，删掉括号里只说明「未公布」的项；括号空了就整个去掉
+    M={'（':'\ue000','(':'\ue001','）':'\ue002',')':'\ue003'};R={v:k for k,v in M.items()}
+    pat=re.compile(r'([（(])([^（()）]*)([）)])')
+    def rep(m):
+        inner=m.group(2)
+        if _NEG.search(inner):
+            inner=_clean_list(inner,'，,；;').strip(' ，,；;')
+            if not inner:return ''
+        return M[m.group(1)]+inner+M[m.group(3)]
+    prev=None
+    while prev!=s:
+        prev=s;s=pat.sub(rep,s)
+    return ''.join(R.get(ch,ch) for ch in s)
+def strip_unpublished(text):
+    if not text or not _NEG.search(text):return text
+    s=_paren(text)
+    segs=[]
+    for seg,sep in _split_top(s,'／'):
+        t=_clean_list(seg,'；;。，,')
+        t=re.sub(r'\s+$','',t)
+        t=re.sub(r'[：:，,；;、\s]+$','',t)
+        t=re.sub(r'^[，,；;。\s]+','',t)
+        if t.strip():segs.append(t.strip())
+    out=' ／ '.join(segs)
+    out=re.sub(r'([；;，,])\s*([。])','\\2',out)
+    out=re.sub(r'([；;，,])\1+','\\1',out)
+    out=re.sub(r'\s*[：:]\s*$','',out)
+    return out.strip()
+def strip_quota(text):
+    if not text or not _NEG.search(text):return text
+    parts=[p.strip() for p in text.split('|')]
+    head=parts[0];rest=[]
+    for p in parts[1:]:
+        lab,c,val=p.partition(':')
+        v=strip_unpublished(val.strip()) if c else strip_unpublished(p)
+        if c and v:rest.append(lab.strip()+': '+v)
+        elif not c and v:rest.append(v)
+    return ' | '.join([strip_unpublished(head)]+rest)
+def write_csv(path,rows,*,enrich_rows=True):  # preserve unrelated columns for classification-only reviews
+    if enrich_rows: enrich(path,rows)
+    for _r in rows:  # 表4不标注「未公布/没有写」类说明（用户2026-11-05）；md 原文不变
+        for _c in ('筆記内容','口述/面接内容'):
+            if _r.get(_c): _r[_c]=strip_unpublished(_r[_c])
+        if _r.get('定員/倍率'): _r['定員/倍率']=strip_quota(_r['定員/倍率'])
     fields=list(COLS)
     try:
         with open(path,encoding='utf-8-sig',newline='') as f: head=next(csv.reader(f),[])
@@ -725,7 +796,7 @@ def skeleton(r,parent_links=None):
     L+=['','## ⏰ 临近提醒','- —','','## 📋 关键日程一览','| 项目 | 内容 | 状态 | 来源 | 最后确认 |','|---|---|---|---|---|']
     L+=[f'| {k} | — | ❓未获取 | — | — |' for k in ('募集要項','出願期間','筆記試験','口述/面接','合格発表','説明会','過去問')]
     L+=['','## 🎯 入試内容（考什么）','','### 語学 / 英語要件','- —','','### 日本語要件','- —','','### 筆記試験（专门科目）',
-        '| 科目 | 范围 · 题型 | 依据 |','|---|---|---|','| — | — | — |','','### 口述試験 / 面接','- **官方形式**：—','- **実際に聞かれた内容**：—','',
+        '| 科目 | 范围·题型 | 时间 |','|---|---|---|','| — | — | — |','','### 口述試験 / 面接','- **官方形式**：—','- **実際に聞かれた内容**：—','',
         '## 📝 详细信息','### 出願資格 / 定員','- —','','### 研究室 / 指導教員','- 事前連絡要否：—','',
         '## 📊 入试数据','| 年度 | 项目 | 数值 | 来源 |','|---|---|---|---|','| — | — | — | — |','',
         '## 📚 経験談 · 参考リンク','| 来源 | 类型 | 年度 | 链接 | 备注 |','|---|---|---|---|---|','| — | — | — | — | — |','',
@@ -764,7 +835,7 @@ def seed(root,csvp,write):
         if os.path.exists(p): print('EXISTS',rel); continue
         os.makedirs(os.path.dirname(p),exist_ok=True)
         open(p,'w',encoding='utf-8').write(skeleton(r,links))
-        add.append(f"| {r['専攻编号']} | {r['大学']} | {r['研究科']} | {master_name(r)} | {r.get('tag','')} | normal | {rel} | ❓未抓取 | — |")
+        add.append(f"| {r['専攻编号']} | {r['大学']} | {r['研究科']} | {master_name(r)} | {r.get('包含学科',r.get('tag',''))} | normal | {rel} | ❓未抓取 | — |")
     if add:
         t=open(idxp,encoding='utf-8').read().rstrip('\n')+'\n'+'\n'.join(add)+'\n'
         tmp=idxp+'.tmp'; open(tmp,'w',encoding='utf-8').write(t); os.replace(tmp,idxp)
@@ -775,11 +846,13 @@ def seed(root,csvp,write):
         else: rows.append(r); pos[k]=len(rows)-1
     write_csv(csvp,rows); print(f'SEEDED {len(add)} 个骨架 md，index.md 与 CSV 已追加')
 def main():
+    import json
     ap=argparse.ArgumentParser()
     ap.add_argument('cmd',choices=['pick','update','rebuild','missing','mark','seed','remove'])
     ap.add_argument('--unresolved',default='',help='mark 用：穷尽来源仍补不上的列，如 "秋冬日程(未公布),事前連絡(官方未记载)"')
     ap.add_argument('paths',nargs='*')
     ap.add_argument('--columns',default='',help='update only: comma-separated output columns; preserve other existing fields')
+    ap.add_argument('--classification-file',default='',help='update --columns 包含学科: reviewed JSON entries keyed by 编号; validates existing IDs and changes only this column')
     ap.add_argument('--root',default='exam-monitor')
     ap.add_argument('--csv',default='4_考学信息一览.csv')
     ap.add_argument('--n',type=int,default=5)
@@ -800,6 +873,34 @@ def main():
     global AUDIT_OFF; AUDIT_OFF=bool(selected) and not (set(selected)&set(DATE_COLUMNS))  # patched-20261023-AUDIT
     if selected and (a.cmd!='update' or any(c not in COLS or c=='编号' for c in selected)):
         ap.error('--columns requires update and valid output columns other than 编号')
+    if a.classification_file:
+        if a.cmd!='update' or selected!=['包含学科'] or a.paths:
+            ap.error('--classification-file requires update --columns 包含学科 and no MD paths')
+        with open(a.classification_file,encoding='utf-8') as f: review=json.load(f)
+        if review.get('version')!=1 or review.get('meaning')!='recommended_applicant_background':
+            raise ValueError('Invalid applicant-background review schema')
+        entries=review.get('entries',{})
+        if not entries:raise ValueError('Empty applicant-background review')
+        rows=read_csv(csvp); ids=[r.get('编号','') for r in rows]
+        if len(ids)!=len(set(ids)):raise ValueError('Duplicate CSV IDs')
+        if set(entries)-set(ids):raise ValueError('Review IDs must already exist in table 4')
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'field_taxonomy.json'),encoding='utf-8') as f:
+            allowed=json.load(f)['allowed']
+        master=major_lookup(os.path.dirname(csvp));changed=0
+        for r in rows:
+            ident=r.get('编号','')
+            if ident not in entries:continue
+            item=entries[ident]; tags=item.get('labels',[])
+            if item.get('status')!='reviewed' or not item.get('reason') or (not tags and not item.get('unrepresented_background')) or any(t not in allowed for t in tags):
+                raise ValueError('Missing audited evidence or invalid labels: '+ident)
+            value=';'.join(t for t in allowed if t in tags)
+            if ident not in master or master[ident][2]!=value:
+                raise ValueError('Table 3 background must agree with audited labels: '+ident)
+            changed+=r.get('包含学科','')!=value
+            r['包含学科']=value
+        write_csv(csvp,rows,enrich_rows=False)
+        print('CLASSIFICATION UPDATED',changed,'rows; other cells preserved')
+        return
     if a.cmd=='remove':
         requested=set(a.paths)
         if not requested or not requested<=excluded_program_ids():

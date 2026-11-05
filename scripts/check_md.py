@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """只读对照：仓库 exam-monitor/ 的 md 和飞书云盘文件夹，按路径列出哪边有、哪边没有。
-不下载、不比较内容、不写入任何东西。顺带检查表格「専攻名」链接是否指向云盘里现存的 md。"""
+不下载、不比较内容、不写入任何东西。顺带检查表格「専攻」链接是否指向云盘里现存的 md。"""
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -66,7 +66,7 @@ def main():
         for x in dups:
             log(f"  ! {x}")
 
-    # 「専攻名」链接检查（按编号列出）
+    # 「専攻」链接检查（按编号列出）
     key2rel = {}
     for rel in local:
         m = ID_RE.match(rel.rpartition("/")[2])

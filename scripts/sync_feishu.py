@@ -2,8 +2,8 @@
 """把 4_考学信息一览.csv 同步到飞书多维表格。
 
 - 唯一键：编号（纯文本，只用来匹配，从不改）。有就更新（只更新有变化的记录），没有就新增。
-- md 链接在超链接字段「専攻名」（LINK_FIELD）：链接本身由 sync_md 维护；这里只在新增时补链接，
-  并让「専攻名」的显示文字跟 CSV 的「専攻」列一致（保留原链接）。飞书里没有「専攻」字段，不同步这一列。
+- md 链接在飞书超链接字段「専攻」（LINK_FIELD）：链接本身由 sync_md 维护；这里只在新增时补链接，
+  并让它的显示文字跟 CSV 的「専攻」列一致（保留原链接）。「専攻」不在 MAPPING 里，不会被当普通文本覆盖。
 - 本次 commit 从 CSV 里删掉的编号（DELETED_KEYS_LIST 列出）：飞书里对应的行删除。
 - 其余 CSV 里没有、飞书里有的记录：不删除，只在日志里列出。
 - 飞书里编号为空的记录：跳过。
@@ -30,8 +30,8 @@ from datetime import datetime, timedelta, timezone
 API = "https://open.feishu.cn/open-apis"
 JST = timezone(timedelta(hours=9))
 KEY = "编号"
-LINK = os.environ.get("LINK_FIELD", "専攻名")   # md 链接所在的超链接字段
-LINK_TEXT_SRC = ("専攻",)                       # 「専攻名」显示文字取自 CSV 的这一列（不同步到飞书）
+LINK = os.environ.get("LINK_FIELD", "専攻")   # md 链接所在的超链接字段
+LINK_TEXT_SRC = ("専攻",)                       # 链接字段的显示文字取自 CSV 的这一列
 
 # CSV 列名 -> 飞书字段名。CSV 列名写成元组时，按顺序取第一个存在的列（兼容改名前后）。
 MAPPING = [
@@ -186,7 +186,7 @@ def key_text(value):
 
 
 def md_link(key):
-    """新增记录时，给「専攻名」找到对应 md 的云盘链接（超链接字段必须带 link）"""
+    """新增记录时，给「専攻」找到对应 md 的云盘链接（超链接字段必须带 link）"""
     domain = (os.environ.get("FEISHU_DOMAIN") or "").rstrip("/")
     root = os.environ.get("FEISHU_FOLDER_TOKEN")
     md_root = os.environ.get("MD_ROOT", "exam-monitor")

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""只把「本次 commit 改动过的」exam-monitor/ 下的 md 同步到飞书云盘，并维护多维表格「専攻名」里的文件链接。
-（「编号」是纯文本匹配键，从不写入；md 链接放在超链接字段「専攻名」，显示文字沿用现有文字，没有则用 CSV 的「専攻」列。）
+"""只把「本次 commit 改动过的」exam-monitor/ 下的 md 同步到飞书云盘，并维护多维表格「専攻」里的文件链接。
+（「编号」是纯文本匹配键，从不写入；md 链接放在超链接字段「専攻」，显示文字沿用现有文字，没有则用 CSV 的「専攻」列。）
 
 改动文件列表由 workflow 用 git diff 生成（MD_CHANGED_LIST 指向的文本文件，一行一个路径）。
 对列表里的每个 md：
 - 仓库里还在：
-  - 云盘里有、内容一样：不动（只校对「専攻名」链接）
-  - 云盘里有、内容不同：上传新文件 -> 把「専攻名」链接指向新文件 -> 确认成功后把旧文件移到回收站
+  - 云盘里有、内容一样：不动（只校对「専攻」链接）
+  - 云盘里有、内容不同：上传新文件 -> 把「専攻」链接指向新文件 -> 确认成功后把旧文件移到回收站
     （飞书 API 不能覆盖已上传文件，只能换新文件，所以 file token 会变）
-  - 云盘里没有：按 大学/研究科/ 结构建文件夹并上传，再补上「専攻名」链接
+  - 云盘里没有：按 大学/研究科/ 结构建文件夹并上传，再补上「専攻」链接
 - 仓库里已删除：只记日志，不删除云盘文件
 另外，MD_DELETED_LIST 列出的 md（本次 commit 从表4 删掉的编号对应的 md）：云盘里的同名文件移到回收站。
 列表以外的 md 一律不碰。只用 Python 标准库。
@@ -19,7 +19,7 @@
   FEISHU_FOLDER_TOKEN                 云盘根文件夹（对应仓库 exam-monitor/）
   FEISHU_DOMAIN                       如 https://ccn3ynd15sp4.feishu.cn
   MD_ROOT                             默认 exam-monitor
-  LINK_FIELD                          放 md 链接的超链接字段，默认 専攻名
+  LINK_FIELD                          放 md 链接的超链接字段，默认 専攻
   MD_CHANGED_LIST                     改动文件列表路径（必填）
   MD_DELETED_LIST                     要从云盘删除的 md 列表路径（可省略）
   DRY_RUN                             "true" 时只打印计划
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from sync_feishu import API, call, get_token, list_records, log  # noqa: E402
 
 KEY = "编号"                                       # 匹配键（纯文本，只读）
-LINK = os.environ.get("LINK_FIELD", "専攻名")       # md 链接所在的超链接字段
+LINK = os.environ.get("LINK_FIELD", "専攻")       # md 链接所在的超链接字段
 CSV_PATH = os.environ.get("CSV_PATH", "4_考学信息一览.csv")  # 链接字段没有文字时，取 CSV 的「専攻」作显示文字
 
 

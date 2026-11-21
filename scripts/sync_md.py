@@ -1,33 +1,10 @@
 #!/usr/bin/env python3
-"""只把「本次 commit 改动过的」exam-monitor/ 下的 md 同步到飞书云盘，并维护多维表格「専攻」里的文件链接。
-（「编号」是纯文本匹配键，从不写入；md 链接放在超链接字段「専攻」，显示文字沿用现有文字，没有则用 CSV 的「専攻」列。）
-
-改动文件列表由 workflow 用 git diff 生成（MD_CHANGED_LIST 指向的文本文件，一行一个路径）。
-对列表里的每个 md：
-- 仓库里还在：
-  - 云盘里有、内容一样：不动（只校对「専攻」链接）
-  - 云盘里有、内容不同：上传新文件 -> 把「専攻」链接指向新文件 -> 确认成功后把旧文件移到回收站
-    （飞书 API 不能覆盖已上传文件，只能换新文件，所以 file token 会变）
-  - 云盘里没有：按 大学/研究科/ 结构建文件夹并上传，再补上「専攻」链接
-- 仓库里已删除：只记日志，不删除云盘文件
-另外，MD_DELETED_LIST 列出的 md（本次 commit 从表4 删掉的编号对应的 md）：云盘里的同名文件移到回收站。
-列表以外的 md 一律不碰。只用 Python 标准库。
-
-环境变量：
-  FEISHU_APP_ID / FEISHU_APP_SECRET   必填
-  FEISHU_APP_TOKEN / FEISHU_TABLE_ID  多维表格
-  FEISHU_FOLDER_TOKEN                 云盘根文件夹（对应仓库 exam-monitor/）
-  FEISHU_DOMAIN                       如 https://ccn3ynd15sp4.feishu.cn
-  MD_ROOT                             默认 exam-monitor
-  LINK_FIELD                          放 md 链接的超链接字段，默认 専攻
-  MD_CHANGED_LIST                     改动文件列表路径（必填）
-  MD_DELETED_LIST                     要从云盘删除的 md 列表路径（可省略）
-  DRY_RUN                             "true" 时只打印计划
-"""
+"""Reconcile Markdown links by CSV key and verify replacements before trashing files."""
 import json
 import os
 import re
 import sys
+import subprocess
 import time
 import unicodedata
 import urllib.error
@@ -38,6 +15,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 from sync_feishu import API, call, get_token, list_records, log  # noqa: E402
 
+from sync_report import Report
+
 KEY = "编号"                                       # 匹配键（纯文本，只读）
 LINK = os.environ.get("LINK_FIELD", "専攻")       # md 链接所在的超链接字段
 CSV_PATH = os.environ.get("CSV_PATH", "4_考学信息一览.csv")  # 链接字段没有文字时，取 CSV 的「専攻」作显示文字
@@ -45,11 +24,12 @@ CSV_PATH = os.environ.get("CSV_PATH", "4_考学信息一览.csv")  # 链接字�
 
 def csv_texts():
     import csv
-    try:
-        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-            return {(r.get("编号") or "").strip(): (r.get("専攻") or "").strip() for r in csv.DictReader(f)}
-    except OSError:
-        return {}
+
+    with open(CSV_PATH, encoding="utf-8-sig", newline="") as stream:
+        return {(row[KEY] or "").strip(): (row["専攻"] or "").strip()
+                for row in csv.DictReader(stream)}
+
+
 ID_RE = re.compile(r"^(\d{3}[A-Z]-\d{2})")
 
 
@@ -143,15 +123,15 @@ class Drive:
 
 
 # ---------------------------------------------------------------- 表格链接
+def link_url(value):
+    segments = value if isinstance(value, list) else [value]
+    return next((seg["link"] for seg in segments
+                 if isinstance(seg, dict) and seg.get("link")), "")
+
+
 def link_of(value):
-    """从超链接字段（{"text","link"}，或文本+链接段）里取 file token"""
-    segs = [value] if isinstance(value, dict) else (value if isinstance(value, list) else [])
-    for seg in segs:
-        if isinstance(seg, dict) and seg.get("link"):
-            m = re.search(r"/file/([A-Za-z0-9]+)", seg["link"])
-            if m:
-                return m.group(1)
-    return None
+    match = re.search(r"/file/([A-Za-z0-9]+)(?:[?#]|$)", link_url(value))
+    return match.group(1) if match else None
 
 
 def key_text(value):
@@ -163,7 +143,7 @@ def key_text(value):
 
 
 def set_link(tok, app, tbl, record_id, text, file_token, domain):
-    """只写 LINK 字段（超链接），不碰「编号」。写入后读回确认；任何 API 错误都返回 False（由调用方回滚）"""
+    """只写 LINK 字段（超链接），不碰「编号」。写入后读回确认；任何 API 错误都返回 False（由调用方保留两份文件）"""
     base = f"/bitable/v1/apps/{app}/tables/{tbl}/records/{record_id}"
     try:
         call("PUT", base, tok, body={"fields": {LINK: {"text": text, "link": f"{domain}/file/{file_token}"}}})
@@ -174,167 +154,169 @@ def set_link(tok, app, tbl, record_id, text, file_token, domain):
     return link_of(got.get("record", {}).get("fields", {}).get(LINK)) == file_token
 
 
-def load_records(tok, app, tbl):
-    """编号 -> (record_id, 当前链接的 file token, 链接显示文字)"""
-    out = {}
-    fallback = csv_texts()
-    for rec in list_records(tok, app, tbl, [KEY, LINK]):
-        f = rec.get("fields", {})
-        key = key_text(f.get(KEY))
-        if key:
-            text = key_text(f.get(LINK)) or fallback.get(key) or key
-            out.setdefault(key, (rec["record_id"], link_of(f.get(LINK)), text))
-    return out
+def tracked_paths(root):
+    output = subprocess.check_output(["git", "ls-files", "-z", "--", root])
+    return [os.fsdecode(path) for path in output.split(b"\0") if path.endswith(b".md")]
 
 
-# ---------------------------------------------------------------- 主流程
-def main():
+def select_path(paths, changed):
+    # Git can contain NFC/NFD aliases. Treat identical blobs at the same
+    # normalized path as one file. Conflicting versions need an explicit fix.
+    canonical = {nfc(path) for path in paths}
+    edited = set(paths) & changed
+    if len(canonical) == 1 and len(edited) == 1:
+        return edited.pop()
+    if len(canonical) == 1:
+        if len(paths) == 1 or len({Path(path).read_bytes() for path in paths}) == 1:
+            return min(paths, key=lambda path: (path != nfc(path), path))
+    raise ValueError("同一编号对应多个不同 MD：" + "、".join(paths))
+
+
+def sync_file(path, record, drive, app, tbl, domain, md_root, compare, dry, emit, references, major, removed):
+    rel_dir, _, name = nfc(path[len(md_root) + 1:]).rpartition("/")
+    folder = drive.folder(rel_dir)
+    candidates = drive.files(folder, name) if folder else []
+    record_id = record["record_id"] if record else None
+    value = record.get("fields", {}).get(LINK) if record else None
+    old_url = link_url(value)
+    old_token = link_of(value)
+    if old_token in candidates and old_url == f"{domain}/file/{old_token}" and not compare:
+        return
+
+    local = Path(path).read_bytes()
+    ordered = sorted(candidates, key=lambda token: (token != old_token, token))
+    new = next((token for token in ordered if drive.download(token) == local), None)
+    if new and old_url == f"{domain}/file/{new}":
+        return
+
+    action = "修复" if new else ("修改" if old_token or candidates else "新增")
+    new_url = f"{domain}/file/{new}" if new else ""
+    # Only retire the previously linked file when its identity and ownership
+    # are clear. Other copies and files from unknown locations stay in place.
+    retire = False
+    retired_folder = None
+    if old_token and old_token != new and references[old_token] == 1:
+        if old_token in candidates:
+            retired_folder = folder
+        else:
+            for old_path in removed:
+                old_dir, _, old_name = nfc(old_path[len(md_root) + 1:]).rpartition("/")
+                parent = drive.folder(old_dir)
+                if parent and old_token in drive.files(parent, old_name):
+                    retired_folder = parent
+                    break
+        retire = retired_folder is not None
+    if dry:
+        emit(action, old=old_url, new=new_url, detail="" if new else "需上传，成功后生成链接")
+        if retire:
+            emit("删除", old=old_url, new=new_url, detail="仅在新链接读回确认后移入回收站")
+        return
+
+    if not new:
+        folder = folder or drive.folder(rel_dir, create=True)
+        new = drive.upload(folder, name, local)
+    new_url = f"{domain}/file/{new}"
+    if not set_link(drive.tok, app, tbl, record_id, major, new, domain):
+        emit("失败", old=old_url, new=new_url,
+             detail="写入或读回链接失败，保留旧文件与新文件")
+        return False
+
+    emit(action, old=old_url, new=new_url)
+    if old_token:
+        references[old_token] -= 1
+    references[new] += 1
+    if retire:
+        try:
+            drive.trash(old_token)
+        except SystemExit as error:
+            emit("失败", old=old_url, new=new_url, detail=f"旧文件移入回收站失败：{error}")
+            return False
+        drive.cache[retired_folder] = [entry for entry in drive.cache[retired_folder]
+                                      if entry["token"] != old_token]
+        emit("删除", old=old_url, new=new_url, detail="新链接已读回确认")
+
+
+def main(report, dry):
+    from collections import Counter, defaultdict
+    from functools import partial
+
     env = os.environ
     app_id, app_secret = env.get("FEISHU_APP_ID"), env.get("FEISHU_APP_SECRET")
     app, tbl = env.get("FEISHU_APP_TOKEN"), env.get("FEISHU_TABLE_ID")
     root_folder, domain = env.get("FEISHU_FOLDER_TOKEN"), (env.get("FEISHU_DOMAIN") or "").rstrip("/")
     md_root = env.get("MD_ROOT", "exam-monitor").rstrip("/")
+    if not all([app_id, app_secret, app, tbl, root_folder, domain]):
+        sys.exit("缺少飞书同步所需的环境变量")
+
     list_path = env.get("MD_CHANGED_LIST")
-    dry = env.get("DRY_RUN", "").lower() == "true"
-    if not all([app_id, app_secret, app, tbl, root_folder, domain, list_path]):
-        sys.exit("缺少环境变量")
-
-    def read_list(path):
-        out = []
-        if path and Path(path).exists():
-            for line in Path(path).read_text(encoding="utf-8").splitlines():
-                p = line.strip()
-                if p.startswith(md_root + "/") and p.endswith(".md") and p not in out:
-                    out.append(p)
-        return out
-
-    deleted = read_list(env.get("MD_DELETED_LIST"))
-    changed = [p for p in read_list(list_path) if p not in deleted]
-    log(f"本次改动的 md：{len(changed)} 个")
-    for p in changed:
-        log(f"  {p}")
-    log(f"表4 删除编号对应、要从云盘删除的 md：{len(deleted)} 个")
-    for p in deleted:
-        log(f"  {p}")
-    if not changed and not deleted:
-        log("没有 md 改动，跳过。")
-        return
-
+    changed = set(Path(list_path).read_text(encoding="utf-8").splitlines()) if list_path else set()
+    compare_all = env.get("MD_COMPARE_ALL") == "true"
+    texts = csv_texts()
     tok = get_token(app_id, app_secret)
     drive = Drive(tok, root_folder)
+    rows, paths = defaultdict(list), defaultdict(list)
+    references = Counter()
+    for record in list_records(tok, app, tbl, [KEY, LINK]):
+        fields = record.get("fields", {})
+        rows[key_text(fields.get(KEY))].append(record)
+        token = link_of(fields.get(LINK))
+        if token:
+            references[token] += 1
+    for path in tracked_paths(md_root):
+        match = ID_RE.match(Path(path).name)
+        if match:
+            paths[match.group(1)].append(path)
 
-    by_key = load_records(tok, app, tbl)
+    changed_keys = set()
+    removed = defaultdict(list)
+    failures = 0
+    for path in sorted(changed):
+        match = ID_RE.match(Path(path).name)
+        if match and match.group(1) in texts:
+            key = match.group(1)
+            changed_keys.add(key)
+            if path not in paths.get(key, []):
+                removed[key].append(path)
+            if not paths.get(key):
+                report.add("保留", file=path, key=key, major=texts[key], detail="仓库中没有替代 MD")
+        elif Path(path).is_file():
+            key = match.group(1) if match else ""
+            report.add("失败", file=path, key=key, detail="CSV 找不到对应编号，保留云盘文件")
+            failures += 1
+        else:
+            report.add("保留", file=path, key=match.group(1) if match else "",
+                       detail="仓库已删除，保留云盘文件")
 
-    stats = {"替换": [], "新上传": [], "内容相同": [], "仓库已删除(未删云盘)": [],
-             "修正链接": [], "表格无此编号": [], "云盘已删除": [], "仓库仍有(请手动删)": [], "失败": []}
-
-    for path in deleted:
-        rel = nfc(path[len(md_root) + 1:])
-        rel_dir, _, name = rel.rpartition("/")
-        if Path(path).exists():
-            stats["仓库仍有(请手动删)"].append(rel)
-            log(f"  ⚠ 编号已从表4 删除，但仓库里还有这个 md：{rel}")
-        folder = drive.folder(rel_dir)
-        toks = drive.files(folder, name) if folder else []
-        if not toks:
-            log(f"  - 云盘里本来就没有：{rel}")
+    for key, options in sorted(paths.items()):
+        if key not in texts:
             continue
-        if dry:
-            log(f"  · 将从云盘删除 {rel}（{len(toks)} 个）")
-            stats["云盘已删除"].append(rel)
-            continue
+        emit = partial(report.add, file="、".join(options), key=key, major=texts[key] or key)
+        prior = [link_url(row.get("fields", {}).get(LINK)) for row in rows[key]]
         try:
-            for t in toks:
-                drive.trash(t)
-            stats["云盘已删除"].append(rel)
-            log(f"  ✓ 云盘已删除（移到回收站）{rel}")
-        except SystemExit as e:
-            stats["失败"].append(rel)
-            log(f"  ✗ 云盘删除失败：{rel}：{e}")
-
-    for path in changed:
-        rel = nfc(path[len(md_root) + 1:])
-        rel_dir, _, name = rel.rpartition("/")
-        local = Path(path)
-        m = ID_RE.match(name)
-        key = m.group(1) if m else None
-        rec = by_key.get(key) if key else None
-
-        if not local.exists():
-            stats["仓库已删除(未删云盘)"].append(rel)
-            log(f"  - 仓库已删除，云盘保留：{rel}")
-            continue
-
-        content = local.read_bytes()
-        folder = drive.folder(rel_dir)
-        olds = drive.files(folder, name) if folder else []
-        if len(olds) > 1:
-            log(f"  ⚠ 云盘同名文件 {len(olds)} 个：{rel}（链接指向的那个视为当前文件，其余不动）")
-        old = olds[0] if olds else None
-        if rec and rec[1] in olds:
-            old = rec[1]
-
-        if old and drive.download(old) == content:
-            stats["内容相同"].append(rel)
-            if rec and rec[1] != old:
-                log(f"  链接待修正 {key} -> {rel}")
-                if not dry:
-                    (stats["修正链接"] if set_link(tok, app, tbl, rec[0], rec[2], old, domain)
-                     else stats["失败"]).append(rel)
-            else:
-                log(f"  = 内容相同 {rel}")
-            continue
-
-        action = "替换" if old else "新上传"
-        if dry:
-            log(f"  · 将{action} {rel}" + ("" if rec or not key else "（表格无此编号，不改链接）"))
-            stats[action].append(rel)
-            continue
-
-        folder = folder or drive.folder(rel_dir, create=True)
-        try:
-            new = drive.upload(folder, name, content)
-        except SystemExit as e:
-            stats["失败"].append(rel)
-            log(f"  ✗ 上传失败：{rel}：{e}")
-            continue
-        if rec:
-            if not set_link(tok, app, tbl, rec[0], rec[2], new, domain):
-                try:
-                    drive.trash(new)  # 回滚：保留旧文件和旧链接
-                except SystemExit:
-                    log(f"  ⚠ 回滚时删除新文件失败，请手动删除云盘里多出的同名文件：{rel}")
-                stats["失败"].append(rel)
-                log(f"  ✗ 链接写入失败，已撤回新文件：{rel}")
-                continue
-            by_key[key] = (rec[0], new, rec[2])
-        elif key:
-            stats["表格无此编号"].append(rel)
-        for t in olds:  # 旧版本（含以前失败遗留的同名文件）全部移到回收站
             try:
-                drive.trash(t)
-            except SystemExit as e:
-                log(f"  ⚠ 旧文件移到回收站失败（不影响链接）：{rel}：{e}")
-        stats[action].append(rel)
-        log(f"  ✓ {action} {rel}")
-
-    log("结果：" + "，".join(f"{k} {len(v)}" for k, v in stats.items() if v))
-    if dry:
-        log("DRY_RUN=true，不写入。")
-
-    summary = env.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a", encoding="utf-8") as f:
-            f.write(f"### md 同步{'（试运行）' if dry else ''}：本次改动 {len(changed)} 个\n\n")
-            f.write("| " + " | ".join(stats) + " |\n|" + "---|" * len(stats) + "\n| " +
-                    " | ".join(str(len(v)) for v in stats.values()) + " |\n\n")
-            for k, v in stats.items():
-                if v:
-                    f.write(f"<details><summary>{k}</summary>\n\n" +
-                            "".join(f"- `{x}`\n" for x in v) + "\n</details>\n\n")
-    if stats["失败"]:
-        sys.exit(f"{len(stats['失败'])} 个文件处理失败")
+                path = select_path(options, changed)
+            except ValueError as error:
+                if key not in changed_keys and len(rows[key]) == 1 and link_of(
+                    rows[key][0].get("fields", {}).get(LINK)
+                ):
+                    emit("保留", old=prior[0], detail=str(error))
+                    continue
+                raise
+            emit = partial(report.add, file=path, key=key, major=texts[key] or key)
+            if len(rows[key]) != 1 and not (dry and not rows[key]):
+                raise ValueError("找不到对应飞书记录" if not rows[key] else "飞书编号重复")
+            record = rows[key][0] if rows[key] else None
+            if sync_file(path, record, drive, app, tbl, domain, md_root,
+                         compare_all or key in changed_keys, dry, emit, references, texts[key] or key, removed[key]) is False:
+                failures += 1
+        except (OSError, ValueError, SystemExit) as error:
+            emit("失败", old="、".join(filter(None, prior)), detail=str(error))
+            failures += 1
+    if failures:
+        sys.exit(f"{failures} 项 MD 同步失败")
 
 
 if __name__ == "__main__":
-    main()
+    dry_run = os.environ.get("DRY_RUN", "").lower() == "true"
+    with Report("md", dry_run).capture() as report:
+        main(report, dry_run)

@@ -2,8 +2,7 @@
 """把 4_考学信息一览.csv 同步到飞书多维表格。
 
 - 唯一键：编号（纯文本，只用来匹配，从不改）。有就更新（只更新有变化的记录），没有就新增。
-- md 链接在飞书超链接字段「専攻」（LINK_FIELD）：链接本身由 sync_md 维护；这里只在新增时补链接，
-  并让它的显示文字跟 CSV 的「専攻」列一致（保留原链接）。「専攻」不在 MAPPING 里，不会被当普通文本覆盖。
+- MD 文件链接由 sync_md 维护。此脚本仅同步现有链接的显示文字。
 - 本次 commit 从 CSV 里删掉的编号（DELETED_KEYS_LIST 列出）：飞书里对应的行删除。
 - 其余 CSV 里没有、飞书里有的记录：不删除，只在日志里列出。
 - 飞书里编号为空的记录：跳过。
@@ -26,6 +25,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+
+from sync_report import Report
 
 API = "https://open.feishu.cn/open-apis"
 JST = timezone(timedelta(hours=9))
@@ -185,26 +186,6 @@ def key_text(value):
     return (value or "").strip()
 
 
-def md_link(key):
-    """新增记录时，给「専攻」找到对应 md 的云盘链接（超链接字段必须带 link）"""
-    domain = (os.environ.get("FEISHU_DOMAIN") or "").rstrip("/")
-    root = os.environ.get("FEISHU_FOLDER_TOKEN")
-    md_root = os.environ.get("MD_ROOT", "exam-monitor")
-    if not (domain and root):
-        return None
-    from pathlib import Path
-    hits = sorted(Path(md_root).rglob(f"{key}*.md")) if Path(md_root).is_dir() else []
-    if hits:
-        from sync_md import Drive, nfc  # 延迟导入，避免循环
-        rel = nfc(hits[0].relative_to(md_root).as_posix())
-        d = Drive(md_link.tok, root)
-        folder = d.folder(rel.rpartition("/")[0])
-        toks = d.files(folder, rel.rpartition("/")[2]) if folder else []
-        if toks:
-            return f"{domain}/file/{toks[0]}"
-    return f"{domain}/drive/folder/{root}"
-
-
 def link_text(texts, key):
     return (texts.get(key) or "").strip() or key
 
@@ -227,13 +208,12 @@ def day(ms):
 
 
 # ---------------------------------------------------------------- 主流程
-def main():
+def main(report, dry):
     app_id = os.environ.get("FEISHU_APP_ID")
     app_secret = os.environ.get("FEISHU_APP_SECRET")
     app = os.environ.get("FEISHU_APP_TOKEN")
     tbl = os.environ.get("FEISHU_TABLE_ID")
     csv_path = os.environ.get("CSV_PATH", "4_考学信息一览.csv")
-    dry = os.environ.get("DRY_RUN", "").lower() == "true"
     if not all([app_id, app_secret, app, tbl]):
         sys.exit("缺少环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_APP_TOKEN / FEISHU_TABLE_ID")
 
@@ -298,9 +278,6 @@ def main():
     for key, want in desired.items():
         if key not in existing:
             fields = {k: v for k, v in want.items() if v is not None}
-            if has_link:
-                md_link.tok = tok
-                fields[LINK] = {"text": link_text(texts, key), "link": md_link(key) if not dry else "(dry-run)"}
             to_create.append({"fields": fields})
             continue
         rid, have, cur_link = existing[key]
@@ -348,34 +325,39 @@ def main():
     if dup_fs:
         log(f"⚠ 飞书中编号重复（只更新第一条）：{dup_fs}")
 
-    if dry:
-        log("DRY_RUN=true，不写入。")
-    else:
-        base = f"/bitable/v1/apps/{app}/tables/{tbl}/records"
-        for i in range(0, len(to_create), 500):
-            call("POST", base + "/batch_create", tok, body={"records": to_create[i:i + 500]})
-        for i in range(0, len(to_update), 500):
-            call("POST", base + "/batch_update", tok, body={"records": to_update[i:i + 500]})
-        ids = [rid for _, rid in to_delete]
-        for i in range(0, len(ids), 500):
-            call("POST", base + "/batch_delete", tok, body={"records": ids[i:i + 500]})
-        log("写入完成。")
+    from sync_md import link_url
 
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a", encoding="utf-8") as f:
-            f.write(f"### 飞书同步{'（试运行）' if dry else ''}\n\n"
-                    f"| 新增 | 更新 | 删除 | 飞书有CSV无 | 编号为空 |\n|---|---|---|---|---|\n"
-                    f"| {len(to_create)} | {len(to_update)} | {len(to_delete)} | {len(orphans)} | {blank} |\n\n")
-            if to_delete:
-                f.write("<details><summary>删除明细</summary>\n\n"
-                        + "".join(f"- `{k}`\n" for k, _ in to_delete) + "\n</details>\n\n")
-            if changes:
-                f.write("<details><summary>更新明细</summary>\n\n")
-                for key, fl in changes[:500]:
-                    f.write(f"- `{key}`: {', '.join(fl)}\n")
-                f.write("\n</details>\n")
+    base = f"/bitable/v1/apps/{app}/tables/{tbl}/records"
+    key_by_id = {rid: key for key, (rid, _, _) in existing.items()}
+    deletions = [{"record_id": rid} for _, rid in to_delete]
+    for action, endpoint, items in (
+        ("新增", "batch_create", to_create),
+        ("修改", "batch_update", to_update),
+        ("删除", "batch_delete", deletions),
+    ):
+        for start in range(0, len(items), 500):
+            batch = items[start:start + 500]
+            payload = [item["record_id"] for item in batch] if action == "删除" else batch
+            try:
+                if not dry:
+                    call("POST", f"{base}/{endpoint}", tok, body={"records": payload})
+            except SystemExit:
+                status = "失败"
+                raise
+            else:
+                status = action
+            finally:
+                for item in batch:
+                    fields = item.get("fields", {})
+                    key = key_by_id.get(item.get("record_id")) or key_text(fields[KEY])
+                    old = link_url(existing[key][2]) if key in existing else ""
+                    new = "" if action == "删除" else link_url(fields[LINK]) if LINK in fields else old
+                    report.add(status, file=csv_path, key=key,
+                               major=texts.get(key) or (key_text(existing[key][2]) if key in existing else ""),
+                               old=old, new=new, detail=f"{action} · " + "、".join(fields))
 
 
 if __name__ == "__main__":
-    main()
+    dry_run = os.environ.get("DRY_RUN", "").lower() == "true"
+    with Report("table", dry_run).capture() as report:
+        main(report, dry_run)

@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+COLUMNS = {"action": "操作", "file": "文件", "key": "编号", "major": "専攻",
+           "old_link": "旧链接", "new_link": "新链接", "detail": "备注"}
 TITLES = {"changes": "1. 本次改动", "table": "2. 表4", "md": "3. md 链接"}
 
 
@@ -61,13 +63,15 @@ class Report:
                     if not events:
                         stream.write(f"### {title}（{self.mode}）：无修改\n\n")
                     else:
+                        rows = [json.loads(line) for line in events[:300]]
+                        # 只显示有内容的列（例如表4 不改链接，就不显示链接列）
+                        cols = [c for c in COLUMNS if c == "action" or any(r.get(c) for r in rows)]
                         stream.write(f"### {title}（{self.mode}） · {len(events)} 条\n\n"
-                                     "| 操作 | 文件 | 编号 | 専攻 | 旧链接 | 新链接 | 备注 |\n"
-                                     "|---|---|---|---|---|---|---|\n")
-                    for line in events[:300]:
-                        values = list(json.loads(line).values())[1:]
-                        cells = [html.escape(str(value)).replace("|", "&#124;")
-                                 .replace("\n", " ").replace("\r", " ") for value in values]
-                        stream.write("| " + " | ".join(cells) + " |\n")
+                                     "| " + " | ".join(COLUMNS[c] for c in cols) + " |\n"
+                                     "|" + "---|" * len(cols) + "\n")
+                        for row in rows:
+                            cells = [html.escape(str(row.get(c, ""))).replace("|", "&#124;")
+                                     .replace("\n", " ").replace("\r", " ") for c in cols]
+                            stream.write("| " + " | ".join(cells) + " |\n")
                     if len(events) > 300:
                         stream.write("\n完整明细见 feishu-sync-report artifact。\n")

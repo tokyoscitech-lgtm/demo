@@ -13,8 +13,9 @@ permissions:
 env:
   FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
   FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-  FEISHU_APP_TOKEN: V86DbzWm5akiKosZogxceiETnyc
-  FEISHU_TABLE_ID: tbl27hOqDLL0WKSX
+  FEISHU_APP_TOKEN: BQd7bdvsZaMV9OsvFElcbFGJnJf
+  FEISHU_TABLE_ID: tblMgUcqdDIUC79g   # 东京理工塾协同系统 ·【学】大学院考学信息表
+  LINK_FIELD: "専攻（点击详情）"        # md 链接所在的超链接字段
   FEISHU_FOLDER_TOKEN: OZmLfpbXcl7rfMdufbZctPhonIh
   FEISHU_DOMAIN: https://ccn3ynd15sp4.feishu.cn
   MD_ROOT: exam-monitor

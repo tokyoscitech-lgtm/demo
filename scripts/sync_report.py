@@ -10,13 +10,14 @@ TITLES = {"changes": "1. 本次改动", "table": "2. 表4", "md": "3. md 链接"
 
 
 def scope_keys():
-    """本次要处理的编号；返回 None 表示全部（没有基线，或手动勾选了全部记录）"""
+    """本次要处理的编号（由各 job 设置的清单决定）；返回 None 表示全部（push 找不到基线时）
+    表4：TABLE_KEYS_LIST + DELETED_KEYS_LIST；md：MD_CHANGED_LIST 里文件名的编号；日期核对：两者合并"""
     import re
 
     if os.environ.get("SCOPE_ALL", "true").lower() == "true":
         return None
     keys = set()
-    for env in ("CHANGED_KEYS_LIST", "DELETED_KEYS_LIST"):
+    for env in ("TABLE_KEYS_LIST", "DELETED_KEYS_LIST"):
         path = os.environ.get(env)
         if path and os.path.exists(path):
             keys |= {line.strip() for line in open(path, encoding="utf-8") if line.strip()}

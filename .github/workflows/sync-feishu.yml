@@ -10,21 +10,17 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "只预览差异，不写入飞书（手动运行时才有这个选项）"
+        description: "只预览差异，不写入飞书"
         type: boolean
         default: true
-      md_commit:
-        description: "md：比较哪个 commit 改动的文件（留空=当前分支最新一次 commit）"
+      table_keys:
+        description: "表4：要同步表格数据的编号（不含 md），逗号或空格分隔，如 001A-01, 015A-01"
         type: string
         default: ""
-      md_paths:
-        description: "md：另外指定要同步的文件，逗号分隔（如 exam-monitor/004大阪大学/.../004C-01物質創成専攻.md）"
+      md_keys:
+        description: "md：要同步 md 的编号，逗号或空格分隔，如 001C-04"
         type: string
         default: ""
-      all_rows:
-        description: "处理全部记录（默认只处理这次改动涉及的编号；换表或需要整体对齐时勾选）"
-        type: boolean
-        default: false
 
 concurrency:
   group: sync-feishu
@@ -65,9 +61,8 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
-          MD_COMMIT: ${{ inputs.md_commit }}
-          MD_PATHS: ${{ inputs.md_paths }}
-          ALL_ROWS: ${{ inputs.all_rows }}
+          TABLE_KEYS: ${{ inputs.table_keys }}
+          MD_KEYS: ${{ inputs.md_keys }}
         run: python scripts/sync_changes.py
       - name: Pass flags to later jobs
         id: flags
@@ -80,7 +75,7 @@ jobs:
           name: detect-files
           path: |
             changed_md.txt
-            changed_keys.txt
+            table_keys.txt
             deleted_keys.txt
       - uses: actions/upload-artifact@v4
         if: always()
@@ -97,7 +92,7 @@ jobs:
     env:
       DRY_RUN: ${{ needs.detect.outputs.dry_run }}
       SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
-      CHANGED_KEYS_LIST: changed_keys.txt
+      TABLE_KEYS_LIST: table_keys.txt
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -126,7 +121,6 @@ jobs:
       DRY_RUN: ${{ needs.detect.outputs.dry_run }}
       MD_COMPARE_ALL: ${{ needs.detect.outputs.compare_all }}
       SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
-      CHANGED_KEYS_LIST: changed_keys.txt
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -154,7 +148,7 @@ jobs:
     timeout-minutes: 15
     env:
       SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
-      CHANGED_KEYS_LIST: changed_keys.txt
+      TABLE_KEYS_LIST: table_keys.txt
       MD_CHANGED_LIST: changed_md.txt
     steps:
       - uses: actions/checkout@v4

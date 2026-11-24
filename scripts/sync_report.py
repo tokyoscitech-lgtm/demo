@@ -6,12 +6,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-TITLES = {"changes": "1. 本次改动", "table": "2. 表4", "md": "3. md 链接", "date": "4. 日期核对"}
+TITLES = {"changes": "1. 本次改动", "table": "2. 表4", "md": "3. md 链接"}
 
 
 def scope_keys():
     """本次要处理的编号（由各 job 设置的清单决定）；返回 None 表示全部（push 找不到基线时）
-    表4：TABLE_KEYS_LIST + DELETED_KEYS_LIST；md：MD_CHANGED_LIST 里文件名的编号；日期核对：两者合并"""
+    表4：TABLE_KEYS_LIST + DELETED_KEYS_LIST；md：MD_CHANGED_LIST 里文件名的编号"""
     import re
 
     if os.environ.get("SCOPE_ALL", "true").lower() == "true":

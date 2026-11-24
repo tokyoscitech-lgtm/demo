@@ -140,36 +140,9 @@ jobs:
           path: sync-report/
           if-no-files-found: ignore
 
-  dates:
-    name: 4. 日期核对（只读）
-    needs: [detect, md]
-    if: ${{ !cancelled() && needs.detect.result == 'success' }}   # md 同步失败也照样核对
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
-      TABLE_KEYS_LIST: table_keys.txt
-      MD_CHANGED_LIST: changed_md.txt
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/download-artifact@v4
-        with:
-          name: detect-files
-      - name: Check md dates vs 更新日期
-        run: python scripts/check_dates.py
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: report-4-dates
-          path: sync-report/
-          if-no-files-found: ignore
-
   report:
-    name: 5. 汇总报告
-    needs: [detect, table, md, dates]
+    name: 4. 汇总报告
+    needs: [detect, table, md]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:

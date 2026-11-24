@@ -330,8 +330,6 @@ def main(report, dry):
     if dups:
         log(f"⚠ 飞书中编号重复（只更新第一条）：{dups}")
 
-    from sync_md import link_url
-
     base = f"/bitable/v1/apps/{app}/tables/{tbl}/records"
     key_by_id = {rid: key for key, (rid, _, _) in existing.items()}
     deletions = [{"record_id": rid} for _, rid in to_delete]
@@ -355,11 +353,11 @@ def main(report, dry):
                 for item in batch:
                     fields = item.get("fields", {})
                     key = key_by_id.get(item.get("record_id")) or key_text(fields[KEY])
-                    old = link_url(existing[key][2]) if key in existing else ""
-                    new = "" if action == "删除" else link_url(fields[LINK]) if LINK in fields else old
-                    report.add(status, file=csv_path, key=key,
+                    # 表4 阶段不改 md 链接，所以报告里不放链接（链接的变化看「3. md 链接」）
+                    changed = "、".join(f for f in fields if f != KEY)
+                    report.add(status, key=key,
                                major=texts.get(key) or (key_text(existing[key][2]) if key in existing else ""),
-                               old=old, new=new, detail=f"{action} · " + "、".join(fields))
+                               detail="CSV 中已删除" if action == "删除" else f"字段：{changed}")
 
 
 if __name__ == "__main__":

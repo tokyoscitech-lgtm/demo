@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from sync_report import Report
+from sync_report import Report, scope_keys
 
 API = "https://open.feishu.cn/open-apis"
 JST = timezone(timedelta(hours=9))
@@ -251,7 +251,7 @@ def main(report, dry):
         if text_col:
             texts[key] = r.get(text_col) or ""
     if dup_csv:
-        log(f"⚠ CSV 中编号重复（以最后一行为准）：{dup_csv}")
+        log(f"⚠ CSV 中编号重复（以最后一行为准）：{dup_csv}")   # CSV 本身的问题，始终提示
 
     # 飞书现有记录
     names = [fn for _, fn in cols]
@@ -274,8 +274,11 @@ def main(report, dry):
                          {fn: norm_existing(fields.get(fn), ftypes[fn]) for fn in names},
                          fields.get(LINK) if has_link else None)
 
+    scope = scope_keys()   # None = 全部记录；否则只处理本次改动的编号
     to_create, to_update, changes = [], [], []
     for key, want in desired.items():
+        if scope is not None and key not in scope:
+            continue
         if key not in existing:
             fields = {k: v for k, v in want.items() if v is not None}
             to_create.append({"fields": fields})
@@ -308,8 +311,8 @@ def main(report, dry):
     deleted_keys = {k for k, _ in to_delete}
     orphans = sorted(k for k in existing if k not in desired and k not in deleted_keys)
 
-    log(f"新增 {len(to_create)}，更新 {len(to_update)}，删除 {len(to_delete)}，"
-        f"未变化 {len(desired) - len(to_create) - len(to_update)}")
+    log(("全部记录" if scope is None else f"本次改动 {len(scope)} 个编号")
+        + f"：新增 {len(to_create)}，更新 {len(to_update)}，删除 {len(to_delete)}")
     if to_delete:
         log("  删除：" + ", ".join(k for k, _ in to_delete))
     if gone and len(to_delete) < len(gone):
@@ -318,12 +321,14 @@ def main(report, dry):
         log(f"  更新 {key}: {', '.join(fl)}")
     if to_create:
         log("  新增：" + ", ".join(key_text(c["fields"][KEY]) for c in to_create[:200]))
-    if orphans:
-        log(f"⚠ 飞书有、CSV 没有（未删除）{len(orphans)} 条：{', '.join(orphans[:100])}")
-    if blank:
-        log(f"⚠ 飞书中编号为空的记录 {blank} 条（已跳过）")
-    if dup_fs:
-        log(f"⚠ 飞书中编号重复（只更新第一条）：{dup_fs}")
+    if scope is None:   # 和本次改动无关的全表提示，只在全部记录模式下打印
+        if orphans:
+            log(f"⚠ 飞书有、CSV 没有（未删除）{len(orphans)} 条：{', '.join(orphans[:100])}")
+        if blank:
+            log(f"⚠ 飞书中编号为空的记录 {blank} 条（已跳过）")
+    dups = [k for k in dup_fs if scope is None or k in scope]
+    if dups:
+        log(f"⚠ 飞书中编号重复（只更新第一条）：{dups}")
 
     from sync_md import link_url
 

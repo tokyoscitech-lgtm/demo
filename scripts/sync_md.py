@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 from sync_feishu import API, call, get_token, list_records, log  # noqa: E402
 
-from sync_report import Report
+from sync_report import Report, scope_keys
 
 KEY = "编号"                                       # 匹配键（纯文本，只读）
 LINK = os.environ.get("LINK_FIELD", "専攻")       # md 链接所在的超链接字段
@@ -229,9 +229,8 @@ def sync_file(path, record, drive, app, tbl, domain, md_root, compare, dry, emit
                     break
         retire = retired_folder is not None
     if dry:
-        emit(action, old=old_url, new=new_url, detail="" if new else "需上传，成功后生成链接")
-        if retire:
-            emit("删除", old=old_url, new=new_url, detail="仅在新链接读回确认后移入回收站")
+        notes = ([] if new else ["需上传"]) + (["旧文件将移入回收站"] if retire else [])
+        emit(action, old=old_url, new=new_url, detail="，".join(notes))
         return
 
     if not new:
@@ -243,7 +242,6 @@ def sync_file(path, record, drive, app, tbl, domain, md_root, compare, dry, emit
              detail="写入或读回链接失败，保留旧文件与新文件")
         return False
 
-    emit(action, old=old_url, new=new_url)
     if old_token:
         references[old_token] -= 1
     references[new] += 1
@@ -251,11 +249,11 @@ def sync_file(path, record, drive, app, tbl, domain, md_root, compare, dry, emit
         try:
             drive.trash(old_token)
         except SystemExit as error:
-            emit("失败", old=old_url, new=new_url, detail=f"旧文件移入回收站失败：{error}")
+            emit("失败", old=old_url, new=new_url, detail=f"链接已{action}，但旧文件移入回收站失败：{error}")
             return False
         drive.cache[retired_folder] = [entry for entry in drive.cache[retired_folder]
                                       if entry["token"] != old_token]
-        emit("删除", old=old_url, new=new_url, detail="新链接已读回确认")
+    emit(action, old=old_url, new=new_url, detail="旧文件已移入回收站" if retire else "")
 
 
 def main(report, dry):
@@ -302,8 +300,7 @@ def main(report, dry):
             if not paths.get(key):
                 report.add("保留", file=path, key=key, major=texts[key], detail="仓库中没有替代 MD")
         elif not match:
-            # index.md 之类没有编号的文件不对应表4 的任何一行，跳过即可，不算失败
-            report.add("跳过", file=path, detail="文件名没有编号，不同步")
+            continue   # index.md 之类没有编号的文件不对应表4 的任何一行，不同步也不报告
         elif Path(path).is_file():
             report.add("失败", file=path, key=match.group(1), detail="CSV 找不到对应编号，保留云盘文件")
             failures += 1
@@ -311,8 +308,9 @@ def main(report, dry):
             report.add("保留", file=path, key=match.group(1) if match else "",
                        detail="仓库已删除，保留云盘文件")
 
+    scope = scope_keys()   # None = 全部；否则 = 本次改动的 md 和表4 行涉及的编号
     for key, options in sorted(paths.items()):
-        if key not in texts:
+        if key not in texts or (scope is not None and key not in scope):
             continue
         emit = partial(report.add, file="、".join(options), key=key, major=texts[key] or key)
         prior = [link_url(row.get("fields", {}).get(LINK)) for row in rows[key]]

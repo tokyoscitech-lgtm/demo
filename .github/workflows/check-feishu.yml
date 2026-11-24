@@ -3,7 +3,6 @@ name: Check 表4 & md vs Feishu
 # 只读对照，不写入飞书：
 # - 表4：逐条对比（哪些编号不同、哪些字段不同；飞书多/少哪些编号）
 # - md：只看有无（只在仓库 / 只在云盘 / 云盘重复），并检查「専攻」链接是否有效
-# - 日期：「専攻」链接的 md 文件名日期 vs 表格「更新日期」（没有日期的单独列出）
 on:
   workflow_dispatch:
 
@@ -45,21 +44,3 @@ jobs:
           python-version: "3.12"
       - name: Compare exam-monitor md with Feishu Drive (existence only)
         run: python scripts/check_md.py
-
-  check-dates:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Compare md file-name dates with 更新日期 (read-only)
-        run: python scripts/check_dates.py
-      - name: Upload date report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: feishu-date-report
-          path: sync-report/
-          if-no-files-found: ignore

@@ -10,15 +10,15 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "只预览差异，不写入飞书（手动运行时才有这个选项）"
+        description: "只预览差异，不写入飞书"
         type: boolean
         default: true
-      md_commit:
-        description: "md：比较哪个 commit 改动的文件（留空=当前分支最新一次 commit）"
+      table_keys:
+        description: "表4：要同步表格数据的编号（不含 md），逗号或空格分隔，如 001A-01, 015A-01"
         type: string
         default: ""
-      md_paths:
-        description: "md：另外指定要同步的文件，逗号分隔（如 exam-monitor/004大阪大学/.../004C-01物質創成専攻.md）"
+      md_keys:
+        description: "md：要同步 md 的编号，逗号或空格分隔，如 001C-04"
         type: string
         default: ""
 
@@ -49,6 +49,7 @@ jobs:
     outputs:
       compare_all: ${{ steps.flags.outputs.compare_all }}
       dry_run: ${{ steps.flags.outputs.dry_run }}
+      scope_all: ${{ steps.flags.outputs.scope_all }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,19 +61,21 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
-          MD_COMMIT: ${{ inputs.md_commit }}
-          MD_PATHS: ${{ inputs.md_paths }}
+          TABLE_KEYS: ${{ inputs.table_keys }}
+          MD_KEYS: ${{ inputs.md_keys }}
         run: python scripts/sync_changes.py
       - name: Pass flags to later jobs
         id: flags
         run: |
           echo "compare_all=${MD_COMPARE_ALL:-false}" >> "$GITHUB_OUTPUT"
           echo "dry_run=${DRY_RUN:-false}" >> "$GITHUB_OUTPUT"
+          echo "scope_all=${SCOPE_ALL:-true}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: detect-files
           path: |
             changed_md.txt
+            table_keys.txt
             deleted_keys.txt
       - uses: actions/upload-artifact@v4
         if: always()
@@ -88,6 +91,8 @@ jobs:
     timeout-minutes: 15
     env:
       DRY_RUN: ${{ needs.detect.outputs.dry_run }}
+      SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
+      TABLE_KEYS_LIST: table_keys.txt
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -115,6 +120,7 @@ jobs:
     env:
       DRY_RUN: ${{ needs.detect.outputs.dry_run }}
       MD_COMPARE_ALL: ${{ needs.detect.outputs.compare_all }}
+      SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -136,15 +142,22 @@ jobs:
 
   dates:
     name: 4. 日期核对（只读）
-    needs: md
-    if: ${{ !cancelled() }}   # md 同步失败也照样核对
+    needs: [detect, md]
+    if: ${{ !cancelled() && needs.detect.result == 'success' }}   # md 同步失败也照样核对
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
+      TABLE_KEYS_LIST: table_keys.txt
+      MD_CHANGED_LIST: changed_md.txt
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: detect-files
       - name: Check md dates vs 更新日期
         run: python scripts/check_dates.py
       - uses: actions/upload-artifact@v4

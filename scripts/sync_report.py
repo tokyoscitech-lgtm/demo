@@ -6,6 +6,30 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+TITLES = {"changes": "1. 本次改动", "table": "2. 表4", "md": "3. md 链接", "date": "4. 日期核对"}
+
+
+def scope_keys():
+    """本次要处理的编号（由各 job 设置的清单决定）；返回 None 表示全部（push 找不到基线时）
+    表4：TABLE_KEYS_LIST + DELETED_KEYS_LIST；md：MD_CHANGED_LIST 里文件名的编号；日期核对：两者合并"""
+    import re
+
+    if os.environ.get("SCOPE_ALL", "true").lower() == "true":
+        return None
+    keys = set()
+    for env in ("TABLE_KEYS_LIST", "DELETED_KEYS_LIST"):
+        path = os.environ.get(env)
+        if path and os.path.exists(path):
+            keys |= {line.strip() for line in open(path, encoding="utf-8") if line.strip()}
+    path = os.environ.get("MD_CHANGED_LIST")
+    if path and os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            match = re.match(r"^(\d{3}[A-Z]-\d{2})", Path(line.strip()).name)
+            if match:
+                keys.add(match.group(1))
+    return keys
+
+
 class Report:
     def __init__(self, name, dry):
         self.name = name
@@ -32,10 +56,14 @@ class Report:
             summary = os.environ.get("GITHUB_STEP_SUMMARY")
             if summary:
                 events = self.path.read_text(encoding="utf-8").splitlines()
+                title = TITLES.get(self.name, self.name)
                 with open(summary, "a", encoding="utf-8") as stream:
-                    stream.write(f"### {self.name} 同步（{self.mode}） · {len(events)} 条\n\n")
-                    stream.write("| 操作 | 文件 | 编号 | 専攻 | 旧链接 | 新链接 | 备注 |\n"
-                                 "|---|---|---|---|---|---|---|\n")
+                    if not events:
+                        stream.write(f"### {title}（{self.mode}）：无修改\n\n")
+                    else:
+                        stream.write(f"### {title}（{self.mode}） · {len(events)} 条\n\n"
+                                     "| 操作 | 文件 | 编号 | 専攻 | 旧链接 | 新链接 | 备注 |\n"
+                                     "|---|---|---|---|---|---|---|\n")
                     for line in events[:300]:
                         values = list(json.loads(line).values())[1:]
                         cells = [html.escape(str(value)).replace("|", "&#124;")

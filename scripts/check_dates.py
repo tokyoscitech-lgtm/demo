@@ -25,7 +25,7 @@ from check_md import walk  # noqa: E402
 from sync_feishu import day, get_token, list_records, log  # noqa: E402
 from sync_md import (CSV_PATH, ID_RE, KEY, LINK, key_text, link_of, link_url,  # noqa: E402
                      md_date, tracked_paths)
-from sync_report import Report  # noqa: E402
+from sync_report import Report, scope_keys  # noqa: E402
 
 DATE_FIELD = os.environ.get("DATE_FIELD", "更新日期")
 ISO = re.compile(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})")
@@ -63,11 +63,12 @@ def main(report):
 
     _, _, names = walk(tok, env["FEISHU_FOLDER_TOKEN"])   # token -> 云盘相对路径
 
+    scope = scope_keys()   # None = 全部（手动全量检查）；否则只核对本次改动的编号
     stats = Counter()
     for rec in list_records(tok, env["FEISHU_APP_TOKEN"], env["FEISHU_TABLE_ID"], [KEY, LINK, DATE_FIELD]):
         fields = rec.get("fields", {})
         key = key_text(fields.get(KEY))
-        if not key:
+        if not key or (scope is not None and key not in scope):
             continue
         url, token = link_url(fields.get(LINK)), link_of(fields.get(LINK))
         emit = lambda action, detail, file="": report.add(  # noqa: E731
@@ -107,7 +108,7 @@ def main(report):
         else:
             stats["一致"] += 1
 
-    log("「専攻」链接 md 日期核对：" + "，".join(f"{k} {v}" for k, v in stats.most_common()))
+    log(("全部记录" if scope is None else f"本次改动 {len(scope)} 个编号") + f" · 「{LINK}」链接 md 日期核对：" + "，".join(f"{k} {v}" for k, v in stats.most_common()))
 
 
 if __name__ == "__main__":

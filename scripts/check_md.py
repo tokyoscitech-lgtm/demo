@@ -25,7 +25,7 @@ def list_folder(tok, folder):
 
 
 def walk(tok, root):
-    files, dups, all_tokens = {}, [], set()
+    files, dups, all_tokens = {}, [], {}   # all_tokens: token -> 相对路径
     level = [(root, "")]
     with ThreadPoolExecutor(4) as ex:
         while level:
@@ -36,7 +36,7 @@ def walk(tok, root):
                     if f["type"] == "folder":
                         nxt.append((f["token"], rel + "/"))
                     elif f["type"] == "file" and rel.endswith(".md"):
-                        all_tokens.add(f["token"])
+                        all_tokens[f["token"]] = rel
                         if rel in files:
                             dups.append(rel)
                         else:

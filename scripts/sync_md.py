@@ -31,6 +31,21 @@ def csv_texts():
 
 
 ID_RE = re.compile(r"^(\d{3}[A-Z]-\d{2})")
+DATE_RE = re.compile(r"_(\d{4}-\d{2}-\d{2})\.md$")   # 001C-04機械工学専攻_2026-11-24.md
+
+
+def md_date(name):
+    """文件名末尾的日期（YYYY-MM-DD）；没有或不是合法日期时返回 None"""
+    from datetime import date
+
+    match = DATE_RE.search(nfc(name or ""))
+    if not match:
+        return None
+    try:
+        date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+    return match.group(1)
 
 
 def nfc(s):
@@ -183,6 +198,13 @@ def sync_file(path, record, drive, app, tbl, domain, md_root, compare, dry, emit
     if old_token in candidates and old_url == f"{domain}/file/{old_token}" and not compare:
         return
 
+    # 文件名带日期时：链接指向的云盘文件比仓库这份新，就不拿旧的去替换（谁新跟谁走）
+    if old_token and old_token not in candidates and folder:
+        linked = next((nfc(f["name"]) for f in drive.ls(folder) if f.get("token") == old_token), None)
+        if md_date(linked) and md_date(name) and md_date(linked) > md_date(name):
+            emit("保留", old=old_url, detail=f"云盘链接的 {linked} 比仓库的 {name} 新，未替换")
+            return
+
     local = Path(path).read_bytes()
     ordered = sorted(candidates, key=lambda token: (token != old_token, token))
     new = next((token for token in ordered if drive.download(token) == local), None)
@@ -279,9 +301,11 @@ def main(report, dry):
                 removed[key].append(path)
             if not paths.get(key):
                 report.add("保留", file=path, key=key, major=texts[key], detail="仓库中没有替代 MD")
+        elif not match:
+            # index.md 之类没有编号的文件不对应表4 的任何一行，跳过即可，不算失败
+            report.add("跳过", file=path, detail="文件名没有编号，不同步")
         elif Path(path).is_file():
-            key = match.group(1) if match else ""
-            report.add("失败", file=path, key=key, detail="CSV 找不到对应编号，保留云盘文件")
+            report.add("失败", file=path, key=match.group(1), detail="CSV 找不到对应编号，保留云盘文件")
             failures += 1
         else:
             report.add("保留", file=path, key=match.group(1) if match else "",

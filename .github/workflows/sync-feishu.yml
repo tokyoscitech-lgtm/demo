@@ -65,6 +65,9 @@ jobs:
         env:
           MD_CHANGED_LIST: changed_md.txt
         run: python scripts/sync_md.py
+      - name: Check md dates vs 更新日期 (read-only)
+        if: ${{ !cancelled() }}
+        run: python scripts/check_dates.py
       - name: Upload Feishu change report
         if: always()
         uses: actions/upload-artifact@v4

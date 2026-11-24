@@ -41,9 +41,14 @@ env:
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
 
 jobs:
-  sync:
+  # 每个阶段一个 job，左侧 Jobs 栏能看到进行到哪一步、哪一步失败
+  detect:
+    name: 1. 检测变更
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
+    outputs:
+      compare_all: ${{ steps.flags.outputs.compare_all }}
+      dry_run: ${{ steps.flags.outputs.dry_run }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,21 +63,106 @@ jobs:
           MD_COMMIT: ${{ inputs.md_commit }}
           MD_PATHS: ${{ inputs.md_paths }}
         run: python scripts/sync_changes.py
+      - name: Pass flags to later jobs
+        id: flags
+        run: |
+          echo "compare_all=${MD_COMPARE_ALL:-false}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${DRY_RUN:-false}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: detect-files
+          path: |
+            changed_md.txt
+            deleted_keys.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-1-detect
+          path: sync-report/
+          if-no-files-found: ignore
+
+  table:
+    name: 2. 同步表4 → 飞书
+    needs: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DRY_RUN: ${{ needs.detect.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: detect-files
       - name: Sync 表4 to Feishu Bitable
         env:
           DELETED_KEYS_LIST: deleted_keys.txt
         run: python scripts/sync_feishu.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-2-table
+          path: sync-report/
+          if-no-files-found: ignore
+
+  md:
+    name: 3. 同步 md 链接
+    needs: [detect, table]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DRY_RUN: ${{ needs.detect.outputs.dry_run }}
+      MD_COMPARE_ALL: ${{ needs.detect.outputs.compare_all }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: detect-files
       - name: Sync MD and verify Feishu links
         env:
           MD_CHANGED_LIST: changed_md.txt
         run: python scripts/sync_md.py
-      - name: Check md dates vs 更新日期 (read-only)
-        if: ${{ !cancelled() }}
-        run: python scripts/check_dates.py
-      - name: Upload Feishu change report
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: feishu-sync-report
+          name: report-3-md
           path: sync-report/
           if-no-files-found: ignore
+
+  dates:
+    name: 4. 日期核对（只读）
+    needs: md
+    if: ${{ !cancelled() }}   # md 同步失败也照样核对
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check md dates vs 更新日期
+        run: python scripts/check_dates.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-4-dates
+          path: sync-report/
+          if-no-files-found: ignore
+
+  report:
+    name: 5. 汇总报告
+    needs: [detect, table, md, dates]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge reports into feishu-sync-report
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: feishu-sync-report
+          pattern: report-*
+          delete-merged: true

@@ -104,7 +104,6 @@ def main(report):
         report.mode = "预览"
     if os.environ.get("GITHUB_ENV"):
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
-            stream.write(f"MD_COMPARE_ALL={str(scope_all).lower()}\n")
             stream.write(f"SCOPE_ALL={str(scope_all).lower()}\n")
             if preview:
                 stream.write("DRY_RUN=true\n")

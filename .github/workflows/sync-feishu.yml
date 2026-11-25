@@ -47,7 +47,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      compare_all: ${{ steps.flags.outputs.compare_all }}
       dry_run: ${{ steps.flags.outputs.dry_run }}
       scope_all: ${{ steps.flags.outputs.scope_all }}
     steps:
@@ -67,7 +66,6 @@ jobs:
       - name: Pass flags to later jobs
         id: flags
         run: |
-          echo "compare_all=${MD_COMPARE_ALL:-false}" >> "$GITHUB_OUTPUT"
           echo "dry_run=${DRY_RUN:-false}" >> "$GITHUB_OUTPUT"
           echo "scope_all=${SCOPE_ALL:-true}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
@@ -119,7 +117,6 @@ jobs:
     timeout-minutes: 45
     env:
       DRY_RUN: ${{ needs.detect.outputs.dry_run }}
-      MD_COMPARE_ALL: ${{ needs.detect.outputs.compare_all }}
       SCOPE_ALL: ${{ needs.detect.outputs.scope_all }}
     steps:
       - uses: actions/checkout@v4

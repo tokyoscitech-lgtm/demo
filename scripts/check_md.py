@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""只读对照：仓库 exam-monitor/ 的 md 和飞书云盘文件夹，按路径列出哪边有、哪边没有。
+"""只读对照：仓库 exam-monitor/ 的 md 和飞书云盘文件夹（md 文件或云文档），按路径列出哪边有、哪边没有。
 不下载、不比较内容、不写入任何东西。顺带检查表格「専攻」链接是否指向云盘里现存的 md。"""
 import os
 import sys
@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 from sync_feishu import call, get_token, list_records, log  # noqa: E402
-from sync_md import ID_RE, KEY, LINK, key_text, link_of, nfc  # noqa: E402
+from sync_md import ID_RE, KEY, LINK, doc_of, key_text, link_of, nfc  # noqa: E402
 
 
 def list_folder(tok, folder):
@@ -25,7 +25,8 @@ def list_folder(tok, folder):
 
 
 def walk(tok, root):
-    files, dups, all_tokens = {}, [], {}   # all_tokens: token -> 相对路径
+    """云盘里的 md：旧方式的 .md 文件，或同名（去掉 .md）的飞书云文档；两者都有时以云文档为准"""
+    md_files, docs, dups, all_tokens = {}, {}, [], {}   # all_tokens: token -> 相对路径
     level = [(root, "")]
     with ThreadPoolExecutor(4) as ex:
         while level:
@@ -35,14 +36,20 @@ def walk(tok, root):
                     rel = pre + nfc(f["name"])
                     if f["type"] == "folder":
                         nxt.append((f["token"], rel + "/"))
-                    elif f["type"] == "file" and rel.endswith(".md"):
-                        all_tokens[f["token"]] = rel
-                        if rel in files:
-                            dups.append(rel)
-                        else:
-                            files[rel] = f["token"]
+                        continue
+                    if f["type"] == "file" and rel.endswith(".md"):
+                        bucket = md_files
+                    elif f["type"] == "docx" and ID_RE.match(nfc(f["name"])):
+                        bucket, rel = docs, rel + ".md"
+                    else:
+                        continue
+                    all_tokens[f["token"]] = rel
+                    if rel in bucket:
+                        dups.append(rel)
+                    else:
+                        bucket[rel] = f["token"]
             level = nxt
-    return files, dups, all_tokens
+    return {**md_files, **docs}, dups, all_tokens
 
 
 def main():
@@ -78,7 +85,7 @@ def main():
         key = key_text(fields.get(KEY))
         if not key:
             continue
-        t = link_of(fields.get(LINK))
+        t = doc_of(fields.get(LINK)) or link_of(fields.get(LINK))   # 云文档或旧 md 文件
         if not t:
             no_link.append(key)
         elif t not in tokens:

@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Reconcile Markdown links by CSV key and verify replacements before trashing files."""
-import json
+"""把仓库里的 md 同步成飞书云文档（docx），表4「専攻」链接指向这篇文档。
+
+- 链接已经是云文档：原地替换内容，链接不变
+- 链接还是旧的 md 文件（或没有链接）：在同一个云盘文件夹里新建云文档，写入内容，
+  换链接并读回确认后，把旧 md 文件移入回收站
+仓库里仍然是 md，转换在同步时完成（飞书 Markdown → 文档块接口）。"""
 import os
 import re
 import sys
 import subprocess
 import time
 import unicodedata
-import urllib.error
-import urllib.request
-import uuid
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
-from sync_feishu import API, call, get_token, list_records, log  # noqa: E402
+from sync_feishu import call, get_token, list_records, log  # noqa: E402
 
 from sync_report import Report, scope_keys
 
@@ -31,21 +32,6 @@ def csv_texts():
 
 
 ID_RE = re.compile(r"^(\d{3}[A-Z]-\d{2})")
-DATE_RE = re.compile(r"_(\d{4}-\d{2}-\d{2})\.md$")   # 001C-04機械工学専攻_2026-11-24.md
-
-
-def md_date(name):
-    """文件名末尾的日期（YYYY-MM-DD）；没有或不是合法日期时返回 None"""
-    from datetime import date
-
-    match = DATE_RE.search(nfc(name or ""))
-    if not match:
-        return None
-    try:
-        date.fromisoformat(match.group(1))
-    except ValueError:
-        return None
-    return match.group(1)
 
 
 def nfc(s):
@@ -54,27 +40,6 @@ def nfc(s):
 
 
 # ---------------------------------------------------------------- 云盘 API
-def raw_request(method, path, token, data=None, headers=None):
-    for attempt in range(6):
-        req = urllib.request.Request(API + path, data=data, method=method)
-        req.add_header("Authorization", f"Bearer {token}")
-        for k, v in (headers or {}).items():
-            req.add_header(k, v)
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return r.read()
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503, 504) and attempt < 5:
-                time.sleep(2 ** attempt)
-                continue
-            sys.exit(f"HTTP {e.code} {method} {path}: {e.read()[:300]!r}")
-        except urllib.error.URLError as e:
-            if attempt < 5:
-                time.sleep(2 ** attempt)
-                continue
-            sys.exit(f"网络错误 {method} {path}: {e}")
-
-
 class Drive:
     """按路径逐级查找文件夹/文件，列目录结果缓存，只访问用得到的目录"""
 
@@ -115,26 +80,8 @@ class Drive:
     def files(self, folder, name):
         return [f["token"] for f in self.ls(folder) if f["type"] == "file" and nfc(f["name"]) == name]
 
-    def download(self, file_token):
-        return raw_request("GET", f"/drive/v1/files/{file_token}/download", self.tok)
-
-    def upload(self, folder, name, content):
-        boundary = uuid.uuid4().hex
-        parts = []
-        for k, v in (("file_name", name), ("parent_type", "explorer"),
-                     ("parent_node", folder), ("size", str(len(content)))):
-            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="file.md"\r\n'
-                     f"Content-Type: application/octet-stream\r\n\r\n".encode() + content + b"\r\n")
-        parts.append(f"--{boundary}--\r\n".encode())
-        res = json.loads(raw_request("POST", "/drive/v1/files/upload_all", self.tok, b"".join(parts),
-                                     {"Content-Type": f"multipart/form-data; boundary={boundary}"}))
-        if res.get("code") != 0:
-            sys.exit(f"上传失败 {name}: {res}")
-        return res["data"]["file_token"]
-
-    def trash(self, file_token):
-        call("DELETE", f"/drive/v1/files/{file_token}", self.tok, query={"type": "file"})
+    def trash(self, file_token, kind="file"):
+        call("DELETE", f"/drive/v1/files/{file_token}", self.tok, query={"type": kind})
 
 
 # ---------------------------------------------------------------- 表格链接
@@ -145,7 +92,14 @@ def link_url(value):
 
 
 def link_of(value):
+    """链接指向的云盘 md 文件 token（旧方式）"""
     match = re.search(r"/file/([A-Za-z0-9]+)(?:[?#]|$)", link_url(value))
+    return match.group(1) if match else None
+
+
+def doc_of(value):
+    """链接指向的飞书云文档 token"""
+    match = re.search(r"/docx/([A-Za-z0-9]+)(?:[?#]|$)", link_url(value))
     return match.group(1) if match else None
 
 
@@ -157,16 +111,87 @@ def key_text(value):
     return (value or "").strip()
 
 
-def set_link(tok, app, tbl, record_id, text, file_token, domain):
-    """只写 LINK 字段（超链接），不碰「编号」。写入后读回确认；任何 API 错误都返回 False（由调用方保留两份文件）"""
+def set_link(tok, app, tbl, record_id, text, url):
+    """只写 LINK 字段（超链接），不碰「编号」。写入后读回确认；任何 API 错误都返回 False（由调用方保留旧文件）"""
     base = f"/bitable/v1/apps/{app}/tables/{tbl}/records/{record_id}"
     try:
-        call("PUT", base, tok, body={"fields": {LINK: {"text": text, "link": f"{domain}/file/{file_token}"}}})
+        call("PUT", base, tok, body={"fields": {LINK: {"text": text, "link": url}}})
         got = call("GET", base, tok)
     except SystemExit as e:
         log(f"  ✗ 写入「{LINK}」链接出错：{e}")
         return False
-    return link_of(got.get("record", {}).get("fields", {}).get(LINK)) == file_token
+    return link_url(got.get("record", {}).get("fields", {}).get(LINK)) == url
+
+
+# ---------------------------------------------------------------- 云文档
+DOC_PACE = 0.4       # 单篇文档编辑限频约 3 次/秒
+MAX_BLOCKS = 1000    # 创建嵌套块接口单次最多插入 1000 个块
+
+
+def convert(tok, markdown):
+    """Markdown → 文档块。表格块的 merge_info 是只读字段，插入前必须去掉"""
+    data = call("POST", "/docx/v1/documents/blocks/convert", tok,
+                body={"content_type": "markdown", "content": markdown})
+    blocks = data.get("blocks") or []
+    for block in blocks:
+        prop = (block.get("table") or {}).get("property")
+        if isinstance(prop, dict):
+            prop.pop("merge_info", None)
+    return data.get("first_level_block_ids") or [], blocks
+
+
+def batches(first_ids, blocks):
+    """按一级块分批，每批（含所有子孙块）不超过 MAX_BLOCKS 个"""
+    by_id = {b["block_id"]: b for b in blocks}
+
+    def subtree(block_id):
+        out, stack = [], [block_id]
+        while stack:
+            cur = by_id.get(stack.pop())
+            if cur:
+                out.append(cur)
+                stack.extend(cur.get("children") or [])
+        return out
+
+    batch_ids, batch_blocks = [], []
+    for block_id in first_ids:
+        tree = subtree(block_id)
+        if batch_ids and len(batch_blocks) + len(tree) > MAX_BLOCKS:
+            yield batch_ids, batch_blocks
+            batch_ids, batch_blocks = [], []
+        batch_ids.append(block_id)
+        batch_blocks.extend(tree)
+    if batch_ids:
+        yield batch_ids, batch_blocks
+
+
+def root_children(tok, doc):
+    data = call("GET", f"/docx/v1/documents/{doc}/blocks/{doc}", tok)
+    return (data.get("block") or {}).get("children") or []
+
+
+def write_doc(tok, doc, first_ids, blocks):
+    """先在最前面插入新内容，再删掉后面的旧内容：中途出错时文档不会被清空"""
+    old_count = len(root_children(tok, doc))
+    rev = {"document_revision_id": -1}
+    index = 0
+    for ids, chunk in batches(first_ids, blocks):
+        call("POST", f"/docx/v1/documents/{doc}/blocks/{doc}/descendant", tok, query=rev,
+             body={"children_id": ids, "index": index, "descendants": chunk})
+        index += len(ids)
+        time.sleep(DOC_PACE)
+    if old_count:
+        call("DELETE", f"/docx/v1/documents/{doc}/blocks/{doc}/children/batch_delete", tok, query=rev,
+             body={"start_index": index, "end_index": index + old_count})
+        time.sleep(DOC_PACE)
+    got = len(root_children(tok, doc))
+    if got != len(first_ids):
+        sys.exit(f"写入后读回不一致：应有 {len(first_ids)} 个一级块，实际 {got} 个")
+
+
+def create_doc(tok, folder, title):
+    data = call("POST", "/docx/v1/documents", tok, body={"folder_token": folder, "title": title})
+    return data["document"]["document_id"]
 
 
 def tracked_paths(root):
@@ -187,73 +212,65 @@ def select_path(paths, changed):
     raise ValueError("同一编号对应多个不同 MD：" + "、".join(paths))
 
 
-def sync_file(path, record, drive, app, tbl, domain, md_root, compare, dry, emit, references, major, removed):
+def sync_doc(path, record, drive, app, tbl, domain, md_root, dry, emit, references, major, removed, key):
     rel_dir, _, name = nfc(path[len(md_root) + 1:]).rpartition("/")
-    folder = drive.folder(rel_dir)
-    candidates = drive.files(folder, name) if folder else []
     record_id = record["record_id"] if record else None
     value = record.get("fields", {}).get(LINK) if record else None
-    old_url = link_url(value)
-    old_token = link_of(value)
-    if old_token in candidates and old_url == f"{domain}/file/{old_token}" and not compare:
+    old_url, doc, old_file = link_url(value), doc_of(value), link_of(value)
+
+    first_ids, blocks = convert(drive.tok, Path(path).read_text(encoding="utf-8"))
+    if not first_ids:
+        raise ValueError("md 转换后没有内容")
+
+    if doc:   # 已是云文档：原地替换内容，链接不变
+        if not dry:
+            write_doc(drive.tok, doc, first_ids, blocks)
+        emit("修改", new=old_url, detail="将原地更新内容，链接不变" if dry else "内容已原地更新，链接不变")
         return
 
-    # 文件名带日期时：链接指向的云盘文件比仓库这份新，就不拿旧的去替换（谁新跟谁走）
-    if old_token and old_token not in candidates and folder:
-        linked = next((nfc(f["name"]) for f in drive.ls(folder) if f.get("token") == old_token), None)
-        if md_date(linked) and md_date(name) and md_date(linked) > md_date(name):
-            emit("保留", old=old_url, detail=f"云盘链接的 {linked} 比仓库的 {name} 新，未替换")
-            return
-
-    local = Path(path).read_bytes()
-    ordered = sorted(candidates, key=lambda token: (token != old_token, token))
-    new = next((token for token in ordered if drive.download(token) == local), None)
-    if new and old_url == f"{domain}/file/{new}":
-        return
-
-    action = "修复" if new else ("修改" if old_token or candidates else "新增")
-    new_url = f"{domain}/file/{new}" if new else ""
-    # Only retire the previously linked file when its identity and ownership
-    # are clear. Other copies and files from unknown locations stay in place.
-    retire = False
+    # 还是旧 md 文件或没有链接：新建云文档，换链接后再处理旧文件
+    action = "迁移" if old_file else "新增"
+    folder = drive.folder(rel_dir)
     retired_folder = None
-    if old_token and old_token != new and references[old_token] == 1:
-        if old_token in candidates:
-            retired_folder = folder
-        else:
-            for old_path in removed:
-                old_dir, _, old_name = nfc(old_path[len(md_root) + 1:]).rpartition("/")
-                parent = drive.folder(old_dir)
-                if parent and old_token in drive.files(parent, old_name):
-                    retired_folder = parent
-                    break
-        retire = retired_folder is not None
+    if old_file and references[old_file] == 1:
+        # 只回收能确认是本编号 md 的旧文件：在同一文件夹（或本次删除的 md 所在文件夹）里、文件名以编号开头
+        folders = [folder] + [drive.folder(nfc(p[len(md_root) + 1:]).rpartition("/")[0]) for p in removed]
+        for parent in filter(None, folders):
+            if any(f.get("token") == old_file and f.get("type") == "file"
+                   and nfc(f.get("name", "")).startswith(key) for f in drive.ls(parent)):
+                retired_folder = parent
+                break
     if dry:
-        notes = ([] if new else ["需上传"]) + (["旧文件将移入回收站"] if retire else [])
-        emit(action, old=old_url, new=new_url, detail="，".join(notes))
+        notes = ["将新建云文档并换链接"] + (["旧 md 文件将移入回收站"] if retired_folder else [])
+        emit(action, old=old_url, detail="，".join(notes))
         return
 
-    if not new:
-        folder = folder or drive.folder(rel_dir, create=True)
-        new = drive.upload(folder, name, local)
-    new_url = f"{domain}/file/{new}"
-    if not set_link(drive.tok, app, tbl, record_id, major, new, domain):
-        emit("失败", old=old_url, new=new_url,
-             detail="写入或读回链接失败，保留旧文件与新文件")
+    folder = folder or drive.folder(rel_dir, create=True)
+    doc = create_doc(drive.tok, folder, Path(name).stem)
+    time.sleep(DOC_PACE)
+    try:
+        write_doc(drive.tok, doc, first_ids, blocks)
+    except SystemExit:
+        try:   # 写入失败的新文档不留在云盘里；旧链接和旧文件都没动
+            drive.trash(doc, "docx")
+        except SystemExit:
+            log(f"  ⚠ 写入失败的新文档 {doc} 未能移入回收站，请手动删除")
+        raise
+    new_url = f"{domain}/docx/{doc}"
+    if not set_link(drive.tok, app, tbl, record_id, major, new_url):
+        emit("失败", old=old_url, new=new_url, detail="云文档已建好，但写入或读回链接失败，旧文件保留")
         return False
-
-    if old_token:
-        references[old_token] -= 1
-    references[new] += 1
-    if retire:
+    if old_file:
+        references[old_file] -= 1
+    if retired_folder:
         try:
-            drive.trash(old_token)
+            drive.trash(old_file)
         except SystemExit as error:
-            emit("失败", old=old_url, new=new_url, detail=f"链接已{action}，但旧文件移入回收站失败：{error}")
+            emit("失败", old=old_url, new=new_url, detail=f"链接已换成云文档，但旧 md 文件移入回收站失败：{error}")
             return False
-        drive.cache[retired_folder] = [entry for entry in drive.cache[retired_folder]
-                                      if entry["token"] != old_token]
-    emit(action, old=old_url, new=new_url, detail="旧文件已移入回收站" if retire else "")
+        drive.cache[retired_folder] = [f for f in drive.cache[retired_folder] if f.get("token") != old_file]
+    emit(action, old=old_url, new=new_url,
+         detail="已建成云文档" + ("，旧 md 文件已移入回收站" if retired_folder else ""))
 
 
 def main(report, dry):
@@ -270,7 +287,6 @@ def main(report, dry):
 
     list_path = env.get("MD_CHANGED_LIST")
     changed = set(Path(list_path).read_text(encoding="utf-8").splitlines()) if list_path else set()
-    compare_all = env.get("MD_COMPARE_ALL") == "true"
     texts = csv_texts()
     tok = get_token(app_id, app_secret)
     drive = Drive(tok, root_folder)
@@ -328,8 +344,8 @@ def main(report, dry):
             if len(rows[key]) != 1 and not (dry and not rows[key]):
                 raise ValueError("找不到对应飞书记录" if not rows[key] else "飞书编号重复")
             record = rows[key][0] if rows[key] else None
-            if sync_file(path, record, drive, app, tbl, domain, md_root,
-                         compare_all or key in changed_keys, dry, emit, references, texts[key] or key, removed[key]) is False:
+            if sync_doc(path, record, drive, app, tbl, domain, md_root, dry, emit,
+                        references, texts[key] or key, removed[key], key) is False:
                 failures += 1
         except (OSError, ValueError, SystemExit) as error:
             emit("失败", old="、".join(filter(None, prior)), detail=str(error))
